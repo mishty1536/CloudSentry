@@ -134,7 +134,12 @@ if scan_clicked or "scan_results" not in st.session_state:
     iam_findings = audit_iam_policy(sample_policy)
     cloudtrail_findings = audit_cloudtrail_configuration(sample_trail)
 
-    # Save results so they remain visible between scans
+    # Save the previous scan before updating the results
+    st.session_state["previous_scan_results"] = (
+        st.session_state.get("scan_results")
+    )
+
+    # Store the latest scan results
     st.session_state["scan_results"] = {
         "s3": s3_findings,
         "iam": iam_findings,
@@ -149,7 +154,6 @@ iam_findings = results["iam"]
 cloudtrail_findings = results["cloudtrail"]
 
 all_findings = s3_findings + iam_findings + cloudtrail_findings
-
 
 # ---------------- RISK SCORING ----------------
 
@@ -181,6 +185,55 @@ else:
     risk_status = "Low Risk"
 
 
+# Record scan history
+if "scan_history" not in st.session_state:
+    st.session_state["scan_history"] = []
+
+st.session_state["scan_history"].append({
+    "Scan Number": len(st.session_state["scan_history"]) + 1,
+    "Total Findings": (
+        len(s3_findings)
+        + len(iam_findings)
+        + len(cloudtrail_findings)
+    ),
+    "High Severity": sum(
+        1 for finding in (
+            s3_findings + iam_findings + cloudtrail_findings
+        )
+        if finding["severity"] == "High"
+    ),
+    "Medium Severity": sum(
+        1 for finding in (
+            s3_findings + iam_findings + cloudtrail_findings
+        )
+        if finding["severity"] == "Medium"
+    ),
+    "Risk Score": risk_score
+})
+
+# ---------------- RISK SCORE HISTORY ----------------
+
+if "risk_history" not in st.session_state:
+    st.session_state["risk_history"] = []
+
+if scan_clicked:
+    st.session_state["risk_history"].append({
+        "Scan": len(st.session_state["risk_history"]) + 1,
+        "Risk Score": risk_score
+    })
+
+
+# ---------------- SCAN HISTORY ----------------
+
+st.divider()
+st.header("🕒 Scan History")
+
+if st.session_state.get("scan_history"):
+    history_df = pd.DataFrame(st.session_state["scan_history"])
+    st.dataframe(history_df, use_container_width=True)
+else:
+    st.info("No scan history available yet.")
+
 # ---------------- DASHBOARD METRICS ----------------
 
 high_count = sum(
@@ -200,6 +253,117 @@ col2.metric("Total Findings", len(all_findings))
 col3.metric("High Severity", high_count)
 col4.metric("Medium Severity", medium_count)
 
+# ---------------- RISK IMPROVEMENT CHART ----------------
+
+st.divider()
+st.header("📈 Security Risk Trend")
+
+risk_history = st.session_state.get("risk_history", [])
+
+if risk_history:
+    risk_df = pd.DataFrame(risk_history)
+
+    st.line_chart(
+        risk_df,
+        x="Scan",
+        y="Risk Score"
+    )
+
+    first_score = risk_history[0]["Risk Score"]
+    latest_score = risk_history[-1]["Risk Score"]
+
+    improvement = first_score - latest_score
+
+    if improvement > 0:
+        st.success(
+            f"Risk score decreased by {improvement} points "
+            "compared with the first recorded scan."
+        )
+    elif improvement < 0:
+        st.warning(
+            f"Risk score increased by {abs(improvement)} points "
+            "compared with the first recorded scan."
+        )
+    else:
+        st.info("The risk score is unchanged from the first recorded scan.")
+else:
+    st.info("Run a scan to begin tracking your security risk trend.")
+
+# ---------------- BEFORE VS AFTER COMPARISON ----------------
+
+st.divider()
+st.header("🔄 Before vs After Security Scan")
+
+previous_results = st.session_state.get("previous_scan_results")
+
+if previous_results:
+    previous_findings = (
+        previous_results["s3"]
+        + previous_results["iam"]
+        + previous_results["cloudtrail"]
+    )
+
+    current_findings = (
+        st.session_state["scan_results"]["s3"]
+        + st.session_state["scan_results"]["iam"]
+        + st.session_state["scan_results"]["cloudtrail"]
+    )
+
+    previous_high = sum(
+        1 for finding in previous_findings
+        if finding.get("severity") == "High"
+    )
+
+    current_high = sum(
+        1 for finding in current_findings
+        if finding.get("severity") == "High"
+    )
+
+    previous_medium = sum(
+        1 for finding in previous_findings
+        if finding.get("severity") == "Medium"
+    )
+
+    current_medium = sum(
+        1 for finding in current_findings
+        if finding.get("severity") == "Medium"
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("📌 Before")
+        st.metric("Total Findings", len(previous_findings))
+        st.metric("High Severity", previous_high)
+        st.metric("Medium Severity", previous_medium)
+
+    with col2:
+        st.subheader("✅ Latest Scan")
+        st.metric("Total Findings", len(current_findings))
+        st.metric(
+            "High Severity",
+            current_high,
+            delta=current_high - previous_high,
+            delta_color="inverse"
+        )
+        st.metric(
+            "Medium Severity",
+            current_medium,
+            delta=current_medium - previous_medium,
+            delta_color="inverse"
+        )
+
+    if len(current_findings) < len(previous_findings):
+        st.success("Security findings have decreased since the previous scan!")
+    elif len(current_findings) > len(previous_findings):
+        st.warning("New security findings have appeared. Review the latest scan.")
+    else:
+        st.info("The total number of findings has not changed.")
+else:
+    st.info(
+        "Run another scan after changing configuration settings "
+        "to compare it with the previous scan."
+    )
 
 # ---------------- SECURITY POSTURE ----------------
 
@@ -265,6 +429,48 @@ st.dataframe(
 )
 
 
+# ---------------- REMEDIATION GUIDANCE ----------------
+
+remediation_guidance = {
+    "S3": {
+        "public": [
+            "Open the AWS S3 console and select the affected bucket.",
+            "Go to Permissions → Block public access.",
+            "Enable all four Block Public Access settings.",
+            "Review the bucket policy and access control lists."
+        ],
+        "encryption": [
+            "Open the bucket's Properties tab.",
+            "Find Default encryption and enable server-side encryption.",
+            "Choose SSE-S3 or SSE-KMS according to your security requirements."
+        ]
+    },
+    "IAM": {
+        "wildcard": [
+            "Open the AWS IAM console and locate the affected policy.",
+            "Replace Action: '*' with only the required actions.",
+            "Replace Resource: '*' with specific resource ARNs wherever possible.",
+            "Follow the principle of least privilege and review permissions regularly."
+        ]
+    },
+    "CloudTrail": {
+        "logging": [
+            "Open the AWS CloudTrail console.",
+            "Create or select a trail and enable logging.",
+            "Configure an S3 destination for log delivery.",
+            "Verify that new events are being recorded."
+        ],
+        "validation": [
+            "Open the trail's configuration.",
+            "Enable log file validation to help detect changes to delivered log files."
+        ],
+        "region": [
+            "Configure a multi-Region trail to record supported events across AWS Regions."
+        ]
+    }
+}
+
+
 # ---------------- RECOMMENDATIONS ----------------
 
 st.divider()
@@ -277,9 +483,36 @@ for finding in all_findings:
         st.write(f"**Severity:** {finding['severity']}")
         st.write(f"**Recommendation:** {finding['recommendation']}")
 
+        finding_text = finding["finding"].lower()
+        service = finding["service"].lower()
 
-st.divider()
+        steps = []
 
+        if service == "s3":
+            if "public" in finding_text:
+                steps = remediation_guidance["S3"]["public"]
+            elif "encrypt" in finding_text:
+                steps = remediation_guidance["S3"]["encryption"]
+
+        elif service == "iam" and (
+            "wildcard" in finding_text
+            or "broad" in finding_text
+            or "permission" in finding_text
+        ):
+            steps = remediation_guidance["IAM"]["wildcard"]
+
+        elif service == "cloudtrail":
+            if "logging" in finding_text or "disabled" in finding_text:
+                steps = remediation_guidance["CloudTrail"]["logging"]
+            elif "validation" in finding_text:
+                steps = remediation_guidance["CloudTrail"]["validation"]
+            elif "region" in finding_text:
+                steps = remediation_guidance["CloudTrail"]["region"]
+
+        if steps:
+            with st.expander("🔧 View Step-by-Step Remediation"):
+                for step_number, step in enumerate(steps, start=1):
+                    st.write(f"{step_number}. {step}")
 
 # ---------------- DOWNLOAD SECURITY REPORT ----------------
 
