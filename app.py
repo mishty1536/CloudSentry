@@ -139,7 +139,13 @@ if scan_clicked or "scan_results" not in st.session_state:
         st.session_state.get("scan_results")
     )
 
-    # Store the latest scan results
+    # Save the current results as the previous scan before updating
+    if "scan_results" in st.session_state:
+        st.session_state["previous_scan_results"] = (
+            st.session_state["scan_results"].copy()
+        )
+
+    # Store the newly completed scan
     st.session_state["scan_results"] = {
         "s3": s3_findings,
         "iam": iam_findings,
