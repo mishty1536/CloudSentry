@@ -2,6 +2,18 @@
 import streamlit as st
 import pandas as pd
 
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle
+)
+from io import BytesIO
+from datetime import datetime
 from s3_auditor import audit_s3_configuration
 from iam_auditor import audit_iam_policy
 from cloudTrail_auditor import audit_cloudtrail_configuration
@@ -520,6 +532,186 @@ for finding in all_findings:
                 for step_number, step in enumerate(steps, start=1):
                     st.write(f"{step_number}. {step}")
 
+
+# ---------------- PDF REPORT GENERATOR ----------------
+
+
+def generate_pdf_report(findings, risk_score, risk_status):
+    buffer = BytesIO()
+
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=35,
+        leftMargin=35,
+        topMargin=45,
+        bottomMargin=45
+    )
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    high_count = sum(
+        1 for f in findings if f.get("severity") == "High"
+    )
+    medium_count = sum(
+        1 for f in findings if f.get("severity") == "Medium"
+    )
+    low_count = sum(
+        1 for f in findings if f.get("severity") == "Low"
+    )
+    info_count = sum(
+        1 for f in findings if f.get("severity") == "Info"
+    )
+
+    story.append(Paragraph(
+        "CloudSentry Security Audit Report",
+        styles["Title"]
+    ))
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph(
+        f"<b>Generated:</b> {datetime.now().strftime('%d %B %Y, %I:%M %p')}",
+        styles["Normal"]
+    ))
+    story.append(Paragraph(
+        "<b>Assessment mode:</b> Sample configuration (demo mode)",
+        styles["Normal"]
+    ))
+    story.append(Spacer(1, 18))
+
+    story.append(Paragraph("Executive Summary", styles["Heading1"]))
+    story.append(Spacer(1, 8))
+
+    summary_data = [
+        ["Metric", "Result"],
+        ["Overall Risk Score", f"{risk_score}/100"],
+        ["Risk Classification", str(risk_status)],
+        ["Total Findings", str(len(findings))],
+    ]
+
+    summary_table = Table(
+        summary_data,
+        colWidths=[220, 270],
+        repeatRows=1
+    )
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#16324F")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("PADDING", (0, 0), (-1, -1), 7),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+
+    story.append(summary_table)
+    story.append(Spacer(1, 18))
+
+    story.append(Paragraph("Severity Breakdown", styles["Heading1"]))
+    story.append(Spacer(1, 8))
+
+    severity_data = [
+        ["High", "Medium", "Low", "Info"],
+        [
+            str(high_count),
+            str(medium_count),
+            str(low_count),
+            str(info_count)
+        ],
+    ]
+
+    severity_table = Table(
+        severity_data,
+        colWidths=[122.5] * 4
+    )
+    severity_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#B91C1C")),
+        ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#D97706")),
+        ("BACKGROUND", (2, 0), (2, 0), colors.HexColor("#2563EB")),
+        ("BACKGROUND", (3, 0), (3, 0), colors.HexColor("#64748B")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("PADDING", (0, 0), (-1, -1), 8),
+    ]))
+
+    story.append(severity_table)
+    story.append(Spacer(1, 20))
+
+    story.append(Paragraph("Detailed Security Findings", styles["Heading1"]))
+    story.append(Spacer(1, 8))
+
+    findings_data = [[
+        "Service",
+        "Severity",
+        "Finding",
+        "Recommendation"
+    ]]
+
+    for finding in findings:
+        findings_data.append([
+            Paragraph(str(finding.get("service", "N/A")), styles["BodyText"]),
+            Paragraph(str(finding.get("severity", "N/A")), styles["BodyText"]),
+            Paragraph(str(finding.get("finding", "N/A")), styles["BodyText"]),
+            Paragraph(
+                str(finding.get("recommendation", "N/A")),
+                styles["BodyText"]
+            ),
+        ])
+
+    if not findings:
+        findings_data.append(["-", "-", "No findings detected", "-"])
+
+    findings_table = Table(
+        findings_data,
+        colWidths=[65, 60, 170, 190],
+        repeatRows=1,
+        hAlign="LEFT"
+    )
+
+    findings_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#16324F")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+
+    story.append(findings_table)
+    story.append(Spacer(1, 18))
+
+    story.append(Paragraph(
+        "<b>Disclaimer:</b> This prototype evaluates sample configurations. "
+        "It does not represent a live AWS account assessment.",
+        styles["Italic"]
+    ))
+
+    def add_page_number(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.grey)
+        canvas.drawString(
+            35, 25, "CloudSentry | Security Assessment Prototype"
+        )
+        canvas.drawRightString(
+            A4[0] - 35, 25, f"Page {doc.page}"
+        )
+        canvas.restoreState()
+
+    document.build(
+        story,
+        onFirstPage=add_page_number,
+        onLaterPages=add_page_number
+    )
+
+    buffer.seek(0)
+    return buffer.getvalue() 
+
 # ---------------- DOWNLOAD SECURITY REPORT ----------------
 
 st.divider()
@@ -538,13 +730,24 @@ if not report_df.empty:
         use_container_width=True
     )
 
+    # Generate the PDF report
+    pdf_data = generate_pdf_report(
+        all_findings,
+        risk_score,
+        risk_status
+    )
+
+    st.download_button(
+        label="📄 Download Audit Report (PDF)",
+        data=pdf_data,
+        file_name="cloudsentry_security_report.pdf",
+        mime="application/pdf",
+        use_container_width=True
+    )
+
     st.caption(
-        "The report contains findings from the most recently completed scan."
+        "Reports contain findings from the most recently completed scan. "
+        "The scan uses sample configurations in demo mode."
     )
 else:
     st.success("No security findings to export.")
-
-st.caption(
-    "CloudSentry prototype | Sample data only | "
-    "No live AWS resources are modified."
-)
