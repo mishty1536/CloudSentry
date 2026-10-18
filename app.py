@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 
 from s3_auditor import audit_s3_configuration
 from iam_auditor import audit_iam_policy
@@ -18,7 +19,56 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🛡️ CloudSentry")
+# --- CloudSentry Appearance ---
+if "theme_mode" not in st.session_state:
+    st.session_state.theme_mode = "Dark"
+
+st.sidebar.subheader("🎨 Appearance")
+
+st.sidebar.radio(
+    "Choose theme",
+    options=["Dark", "Light"],
+    key="theme_mode",
+    format_func=lambda mode: "🌙 Dark Mode" if mode == "Dark" else "☀️ Light Mode",
+)
+
+theme_css = Path(__file__).parent / "theme.css"
+css = theme_css.read_text(encoding="utf-8")
+
+# Apply the selected palette directly to CSS variables so the toggle works reliably.
+if st.session_state.theme_mode == "Dark":
+    active_palette = {
+        "bg": "#080D18", "surface": "#0E1728", "surface_raised": "#121F33",
+        "surface_alt": "#16263D", "text": "#EAF1FB", "muted": "#9BAFC9",
+        "border": "#263A56", "accent": "#60A5FA", "accent_hover": "#93C5FD",
+        "cyan": "#5BE0E6", "success": "#50D6A4", "warning": "#F5C46B",
+        "danger": "#FF8198", "input": "#101C2F", "shadow": "rgba(0,0,0,.24)"
+    }
+else:
+    active_palette = {
+        "bg": "#F3F6FC", "surface": "#FFFFFF", "surface_raised": "#FFFFFF",
+        "surface_alt": "#EAF0FA", "text": "#17263D", "muted": "#60718A",
+        "border": "#D5E0EF", "accent": "#1D4ED8", "accent_hover": "#1E40AF",
+        "cyan": "#087E99", "success": "#087F5B", "warning": "#946200",
+        "danger": "#B42352", "input": "#FFFFFF", "shadow": "rgba(30,55,90,.08)"
+    }
+
+palette_css = ":root, .stApp, [data-testid=\"stAppViewContainer\"], section[data-testid=\"stSidebar\"] {\n" + "\n".join(
+    f"  --cs-{key.replace('_', '-')}: {value};" for key, value in active_palette.items()
+) + "\n  color-scheme: " + ("dark" if st.session_state.theme_mode == "Dark" else "light") + ";\n}"
+st.markdown(f"<style>{css}\n{palette_css}</style>", unsafe_allow_html=True)
+
+st.markdown(
+    """
+    <div class="cs-hero">
+        <div class="cs-eyebrow">CLOUD SECURITY • THREAT MONITORING</div>
+        <h1 class="cs-hero-title">🛡️ CloudSentry</h1>
+        <p class="cs-hero-subtitle">AWS Misconfiguration Detection &amp; Risk Assessment</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.header("AWS Cloud Security Assessment Dashboard")
 
 st.write(
@@ -101,6 +151,66 @@ def make_findings_dataframe(findings):
             df[column] = ""
 
     return df[columns]
+
+
+def display_dataframe(df, *, hide_index=True):
+    """Render dataframes using the active CloudSentry palette."""
+    if df is None:
+        df = pd.DataFrame()
+
+    dark_mode = st.session_state.get("theme_mode", "Dark") == "Dark"
+    if dark_mode:
+        background = "#0E1728"
+        alternate = "#121F33"
+        header = "#1B3150"
+        text = "#EAF1FB"
+        border = "#263A56"
+    else:
+        background = "#FFFFFF"
+        alternate = "#F3F6FC"
+        header = "#E5EDF9"
+        text = "#17263D"
+        border = "#D5E0EF"
+
+    styler = df.style.set_table_styles([
+        {"selector": "th", "props": [
+            ("background-color", header), ("color", text),
+            ("border", f"1px solid {border}"), ("font-weight", "700"),
+            ("padding", "10px")
+        ]},
+        {"selector": "td", "props": [
+            ("color", text), ("border", f"1px solid {border}"),
+            ("padding", "9px")
+        ]},
+        {"selector": "table", "props": [
+            ("border-collapse", "collapse"), ("border-radius", "10px"),
+            ("overflow", "hidden"), ("width", "100%")
+        ]},
+    ]).set_properties(**{"background-color": background, "color": text})
+
+    # Alternate rows and tint severity text without changing the underlying data.
+    def row_style(row):
+        row_number = row.name if isinstance(row.name, int) else 0
+        base = background if row_number % 2 == 0 else alternate
+        styles = [f"background-color: {base}; color: {text};"] * len(row)
+        if "severity" in row.index:
+            severity = str(row.get("severity", "")).strip().lower()
+            color = {
+                "high": "#FF8198" if dark_mode else "#B42352",
+                "medium": "#F5C46B" if dark_mode else "#946200",
+                "low": "#5BE0E6" if dark_mode else "#087E99",
+                "info": "#50D6A4" if dark_mode else "#087F5B",
+            }.get(severity)
+            if color:
+                styles[row.index.get_loc("severity")] = (
+                    f"background-color: {base}; color: {color}; font-weight: 700;"
+                )
+        return styles
+
+    if not df.empty:
+        styler = styler.apply(row_style, axis=1)
+
+    st.dataframe(styler, use_container_width=True, hide_index=hide_index)
 
 
 def run_audit(
@@ -349,11 +459,7 @@ st.header("🕒 Scan History")
 history_df = pd.DataFrame(st.session_state["scan_history"])
 
 if not history_df.empty:
-    st.dataframe(
-        history_df,
-        use_container_width=True,
-        hide_index=True
-    )
+    display_dataframe(history_df, hide_index=True)
 else:
     st.caption("No scans have been recorded in this session yet.")
 
@@ -612,11 +718,7 @@ if all_findings:
     )
 
     # Display only actual findings
-    st.dataframe(
-        filtered_df.reset_index(drop=True),
-        use_container_width=True,
-        hide_index=True
-    )
+    display_dataframe(filtered_df.reset_index(drop=True), hide_index=True)
 
 else:
     st.success("No security findings to display.")
@@ -629,31 +731,19 @@ st.divider()
 st.header("🪣 S3 Security Findings")
 st.write("Checks public access protection and default encryption.")
 
-st.dataframe(
-    make_findings_dataframe(results["s3"]),
-    use_container_width=True,
-    hide_index=True
-)
+display_dataframe(make_findings_dataframe(results["s3"]), hide_index=True)
 
 st.divider()
 st.header("🔑 IAM Permission Findings")
 st.write("Checks sample IAM policies for potentially broad permissions.")
 
-st.dataframe(
-    make_findings_dataframe(results["iam"]),
-    use_container_width=True,
-    hide_index=True
-)
+display_dataframe(make_findings_dataframe(results["iam"]), hide_index=True)
 
 st.divider()
 st.header("📜 CloudTrail Logging Findings")
 st.write("Checks sample activity logging and trail configuration.")
 
-st.dataframe(
-    make_findings_dataframe(results["cloudtrail"]),
-    use_container_width=True,
-    hide_index=True
-)
+display_dataframe(make_findings_dataframe(results["cloudtrail"]), hide_index=True)
 
 
 # ============================================================

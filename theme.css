@@ -1,0 +1,239 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --cs-bg: #080D18;
+  --cs-surface: #0E1728;
+  --cs-surface-raised: #121F33;
+  --cs-surface-alt: #16263D;
+  --cs-text: #EAF1FB;
+  --cs-muted: #9BAFC9;
+  --cs-border: #263A56;
+  --cs-accent: #60A5FA;
+  --cs-accent-hover: #93C5FD;
+  --cs-cyan: #5BE0E6;
+  --cs-success: #50D6A4;
+  --cs-warning: #F5C46B;
+  --cs-danger: #FF8198;
+  --cs-input: #101C2F;
+  --cs-shadow: rgba(0,0,0,.24);
+  color-scheme: dark;
+}
+
+/* Apply the font to text without overriding Streamlit's icon fonts */
+/* Georgia font throughout CloudSentry */
+html,
+body,
+button,
+input,
+textarea,
+select,
+p,
+label,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.stMarkdown,
+.stCaption {
+    font-family: Georgia, "Times New Roman", serif !important;
+}
+
+/* Keep Streamlit icons using their original icon font */
+[data-testid="stIconMaterial"],
+.material-icons,
+.material-symbols-rounded,
+.material-symbols-outlined {
+    font-family: "Material Symbols Rounded", sans-serif !important;
+}
+
+/* Keep checkbox styling consistent with the blue theme */
+[data-testid="stCheckbox"] input[type="checkbox"] {
+  accent-color: var(--cs-accent) !important;
+}
+
+.stApp {
+  background: var(--cs-bg) !important;
+  color: var(--cs-text) !important;
+  transition: background .25s ease, color .25s ease;
+}
+
+/* Apply palette to Streamlit's nested surfaces too, so both themes switch together. */
+.stApp, .stApp [data-testid="stAppViewContainer"],
+.stApp [data-testid="stMain"],
+section[data-testid="stSidebar"],
+section[data-testid="stSidebar"] > div {
+  color: var(--cs-text) !important;
+}
+
+.stApp [data-testid="stMainBlockContainer"] > div {
+  gap: 1.15rem;
+}
+
+.stApp [data-testid="stVerticalBlock"] {
+  gap: .9rem;
+}
+.stApp [data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(ellipse at 8% 0%, color-mix(in srgb, var(--cs-accent) 9%, transparent), transparent 34rem),
+    var(--cs-bg);
+}
+.stApp [data-testid="stHeader"] { background: transparent; }
+.stApp [data-testid="stMainBlockContainer"] { padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1500px; }
+
+/* Header / brand */
+.cs-hero {
+  position: relative;
+  overflow: hidden;
+  padding: 30px 32px;
+  margin: 0 0 26px 0;
+  border: 1px solid color-mix(in srgb, var(--cs-accent) 42%, var(--cs-border));
+  border-radius: 18px;
+  background: linear-gradient(120deg, #0B1424 0%, #102743 58%, #12365A 100%);
+  box-shadow: 0 14px 38px rgba(0,0,0,.17);
+}
+.cs-hero::after {
+  content: "";
+  position: absolute;
+  width: 240px; height: 240px;
+  right: -70px; top: -120px;
+  border: 1px solid rgba(147,197,253,.24);
+  border-radius: 50%;
+  box-shadow: 0 0 0 24px rgba(96,165,250,.035), 0 0 0 50px rgba(96,165,250,.025);
+  pointer-events: none;
+}
+.cs-eyebrow { color: #8CC8FF; font-size: .76rem; font-weight: 700; letter-spacing: .19em; }
+.cs-hero-title { color: #F4F8FF !important; font-size: clamp(2rem, 3vw, 2.8rem) !important; font-weight: 700 !important; letter-spacing: -.035em; margin: .55rem 0 .3rem 0 !important; }
+.cs-hero-subtitle { color: #C3D7F0 !important; margin: 0 !important; font-size: 1rem; }
+
+/* Main text hierarchy */
+h1, h2, h3, h4, h5, h6 { color: var(--cs-text) !important; letter-spacing: -.018em; }
+p, label, .stMarkdown, .stCaption, [data-testid="stWidgetLabel"] { color: var(--cs-text); }
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] span { color: inherit; }
+.stApp [data-testid="stVerticalBlockBorderWrapper"] > div { padding: .25rem; }
+[data-testid="stCaptionContainer"] p, .stCaption { color: var(--cs-muted) !important; }
+hr { border-color: var(--cs-border) !important; opacity: .9; }
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+  background: var(--cs-surface);
+  border-right: 1px solid var(--cs-border);
+}
+section[data-testid="stSidebar"] > div { background: transparent; }
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: var(--cs-text); }
+
+/* Cards and metric surfaces */
+[data-testid="stMetric"] {
+  background: var(--cs-surface);
+  border: 1px solid var(--cs-border);
+  border-radius: 14px;
+  padding: 17px 18px;
+  box-shadow: 0 6px 20px var(--cs-shadow);
+}
+[data-testid="stMetricLabel"] { color: var(--cs-muted) !important; font-weight: 500; }
+[data-testid="stMetricValue"] { color: var(--cs-text) !important; font-weight: 700; }
+[data-testid="stMetricDelta"] { font-weight: 600; }
+[data-testid="stVerticalBlockBorderWrapper"] {
+  border-color: var(--cs-border) !important;
+  border-radius: 14px !important;
+  background: var(--cs-surface);
+}
+[data-testid="stExpander"] {
+  border: 1px solid var(--cs-border) !important;
+  border-radius: 12px !important;
+  background: var(--cs-surface);
+}
+[data-testid="stExpander"] summary { color: var(--cs-text) !important; }
+
+/* Buttons: consistent blue primary action, including Scan Configuration */
+.stButton > button, .stDownloadButton > button, [data-testid="stFormSubmitButton"] button {
+  border-radius: 10px !important;
+  font-weight: 600 !important;
+  border: 1px solid var(--cs-border) !important;
+  transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.stButton > button[kind="primary"],
+[data-testid="stFormSubmitButton"] button[kind="primary"],
+.stDownloadButton > button[kind="primary"] {
+  color: #071321 !important;
+  background: linear-gradient(135deg, #60A5FA, #5BE0E6) !important;
+  border: 1px solid #6CB8F9 !important;
+  box-shadow: 0 5px 18px rgba(59,130,246,.17);
+}
+.stButton > button:hover, .stDownloadButton > button:hover, [data-testid="stFormSubmitButton"] button:hover {
+  border-color: var(--cs-accent) !important;
+  box-shadow: 0 5px 18px var(--cs-shadow);
+  transform: translateY(-1px);
+}
+.stButton > button:focus, .stDownloadButton > button:focus, button:focus-visible { outline-color: var(--cs-accent) !important; }
+
+/* Inputs, select boxes and dropdown menus */
+.stTextInput input, .stNumberInput input, .stTextArea textarea,
+[data-baseweb="select"] > div, [data-baseweb="input"] > div,
+[data-baseweb="textarea"] > div {
+  background: var(--cs-input) !important;
+  color: var(--cs-text) !important;
+  border-color: var(--cs-border) !important;
+  border-radius: 9px !important;
+}
+[data-baseweb="select"] span, [data-baseweb="select"] input { color: var(--cs-text) !important; }
+[data-baseweb="popover"] > div, [role="listbox"], [data-baseweb="menu"] {
+  background: var(--cs-surface-raised) !important;
+  border: 1px solid var(--cs-border) !important;
+  color: var(--cs-text) !important;
+}
+[role="option"] { color: var(--cs-text) !important; }
+[role="option"]:hover, [aria-selected="true"] { background: var(--cs-surface-alt) !important; }
+input[type="checkbox"] { accent-color: var(--cs-accent); }
+[data-testid="stCheckbox"] label, [data-testid="stRadio"] label { color: var(--cs-text) !important; }
+
+/* Alerts */
+[data-testid="stAlert"] { border-radius: 12px; border: 1px solid var(--cs-border); }
+[data-testid="stAlert"] p { color: var(--cs-text) !important; }
+[data-testid="stAlert"] svg { flex-shrink: 0; }
+
+/* Dataframes: avoid white default cells in dark mode */
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+  border: 1px solid var(--cs-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+[data-testid="stDataFrame"] iframe { background: var(--cs-surface) !important; }
+[data-testid="stDataFrame"] [role="grid"] { background: var(--cs-surface) !important; color: var(--cs-text) !important; }
+[data-testid="stDataFrame"] [role="columnheader"] { background: var(--cs-surface-alt) !important; color: var(--cs-text) !important; }
+
+/* Charts and progress */
+[data-testid="stVegaLiteChart"], [data-testid="stArrowVegaLiteChart"], [data-testid="stLineChart"] {
+  background: var(--cs-surface);
+  border: 1px solid var(--cs-border);
+  border-radius: 14px;
+  padding: 10px;
+}
+[data-testid="stProgress"] > div > div { background: linear-gradient(90deg, var(--cs-accent), var(--cs-cyan)) !important; }
+
+/* Links and focus */
+a { color: var(--cs-accent) !important; }
+::selection { background: color-mix(in srgb, var(--cs-accent) 30%, transparent); }
+
+/* Light mode hero remains intentionally deep navy for contrast. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
+
+
+/* Improve compact controls and keep focus visible in either theme. */
+.stSelectbox, .stRadio, .stCheckbox, .stTextInput, .stNumberInput {
+  margin-bottom: .15rem;
+}
+button, input, textarea, [role="combobox"] {
+  font-family: 'Inter', 'Segoe UI', Arial, sans-serif !important;
+}
+[data-testid="stForm"] {
+  border: 1px solid var(--cs-border);
+  border-radius: 16px;
+  padding: 1.1rem 1.2rem 1.25rem;
+  background: color-mix(in srgb, var(--cs-surface) 90%, transparent);
+}
