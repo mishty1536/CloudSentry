@@ -1,27 +1,228 @@
-# CloudSentry
+# CloudSentry — Cloud Security Misconfiguration Auditor
 
-CloudSentry is a Streamlit dashboard for sample cloud-security assessments and optional, explicitly started AWS read-only checks. Demo mode uses local sample data and does not create AWS clients or call AWS APIs.
+CloudSentry is a Streamlit-based dashboard for assessing common cloud-security misconfigurations in Amazon Web Services (AWS). It provides security findings, recommendations, scan comparisons, and downloadable reports.
 
-## Run locally
+The project supports two modes:
 
-Use Python 3.11. Install the pinned dependencies in your environment with `python -m pip install -r requirements.txt`, then run `python -m streamlit run app.py`.
+- **Demo mode:** Uses sample configurations and local sample data. It does not create AWS clients or call AWS APIs.
+- **AWS read-only mode:** Performs explicitly initiated checks against selected AWS security configurations when enabled in a suitable, controlled environment.
 
-Demo is the default and works without AWS credentials. For a non-public local environment only, AWS mode can be enabled by setting `CLOUDSENTRY_ENABLE_AWS_SCAN=true`; AWS calls still begin only after you press **Start AWS scan**. AWS mode uses Boto3's standard credential provider chain through `boto3.Session`. Use an approved provider such as IAM Identity Center/SSO or an attached role. Do not paste access keys into CloudSentry, source files, Streamlit secrets, or this README. CloudSentry does not print or save credentials.
+CloudSentry is an educational security-auditing prototype. Its findings are intended to assist security reviews and do not replace a comprehensive cloud security assessment.
 
-## Public Streamlit Community Cloud Demo deployment
+## Live Demo
 
-The public portfolio configuration is Demo-only. Leave `CLOUDSENTRY_ENABLE_AWS_SCAN` unset and do not add AWS credentials or secrets to the Community Cloud app. Without that explicit opt-in, the AWS mode selector is hidden and the app blocks AWS scan execution.
+**Application URL:** http://3.26.214.34:8501
 
-1. Push the reviewed project to a GitHub repository when you are ready to publish it. The repository must include `app.py`, `theme.css`, all auditor/helper modules, and `requirements.txt`.
-2. Sign in to Streamlit Community Cloud with GitHub and create a new app from that repository and the intended branch.
-3. Set the app's main file path to the root-level `app.py` and select Python 3.11.
-4. Deploy the app and use its public URL for the portfolio. A public app can be visited by anyone; publish only code and sample data intended for public viewing.
+CloudSentry is deployed on an Amazon EC2 instance running Amazon Linux 2023. The current public deployment runs in Demo mode and uses sample configurations.
 
-`app.py` loads `theme.css` from its own directory, so keep `theme.css` beside it in the repository root. No Dockerfile or custom port configuration is needed for Community Cloud. Scan history and comparisons are held in Streamlit session state and are not persistent across sessions or app restarts. Community Cloud availability and resource limits can change; check the platform's current terms before publishing.
+> **Security notice:** The demo is served over HTTP, and port 8501 is publicly accessible. Do not submit sensitive information to this deployment. AWS live scanning must remain disabled for this unauthenticated public demo.
 
-## Read-only IAM permissions
+The application is available while the EC2 instance and Streamlit process are running. Its public IP address may change if the instance is stopped and restarted.
 
-Attach a least-privilege policy like the following to the identity used by Boto3. The bucket-level S3 operations are scoped to bucket ARNs. Inventory and account-wide IAM operations require `Resource: "*"`; `DescribeTrails` also requires `Resource: "*"`, while trail status can be scoped to trail ARNs.
+## Features
+
+- **S3 Security Auditing:** Checks selected bucket-level public-access-block and default encryption configurations.
+- **IAM Security Auditing:** Reviews selected account-level IAM security indicators and identity-policy documents.
+- **CloudTrail Auditing:** Checks selected trail logging and configuration indicators in a chosen AWS region.
+- **Security Findings:** Displays findings with severity classifications and explanations.
+- **Recommendations:** Provides suggestions to help address identified security issues.
+- **Scan Comparison:** Compares scan results to help identify changes in security findings.
+- **Risk Score:** Provides a prototype risk score based on the application's existing scoring formula.
+- **Report Download:** Allows users to download a report of scan results.
+- **Demo Mode:** Supports demonstrations without AWS credentials or live AWS API calls.
+- **Read-only AWS Checks:** Uses Boto3 to retrieve selected configuration information without creating, updating, or deleting AWS resources.
+- **Unknown / Unverified Results:** Represents checks that cannot be verified rather than automatically treating them as secure or vulnerable.
+
+## Technology Stack
+
+- **Language:** Python
+- **Dashboard:** Streamlit
+- **Data processing:** Pandas
+- **AWS SDK:** Boto3
+- **Cloud platform:** Amazon Web Services (AWS)
+- **Compute and hosting:** Amazon EC2
+- **Operating system:** Amazon Linux 2023
+- **Version control:** Git and GitHub
+- **Testing:** Python `unittest` with mocked AWS clients
+
+## Architecture Overview
+
+1. The user interacts with the Streamlit dashboard.
+2. In Demo mode, the application evaluates sample configurations without making AWS API calls.
+3. In AWS mode, when explicitly enabled and started, the relevant auditor modules use Boto3 to retrieve selected AWS configuration information.
+4. The audit logic evaluates the available configuration data and generates findings.
+5. The dashboard displays findings, recommendations, and the prototype risk score.
+6. Users can compare scan results and download reports.
+
+The application contains separate auditor modules for S3, IAM, and CloudTrail, alongside shared dashboard helpers and a dedicated test suite.
+
+## Project Structure
+
+```text
+CloudSentry/
+├── app.py
+├── aws_auditor.py
+├── s3_auditor.py
+├── iam_auditor.py
+├── cloudTrail_auditor.py
+├── dashboard_helpers.py
+├── theme.css
+├── requirements.txt
+├── checks/
+└── README.md
+```
+
+The `checks/` directory contains the automated tests. The application loads `theme.css` from the project directory, so keep it alongside `app.py`.
+
+## Run Locally
+
+### Prerequisites
+
+- Python 3.11
+- Git
+- Internet access to install Python dependencies
+
+### Installation
+
+Clone the repository:
+
+```bash
+git clone https://github.com/mishty1536/CloudSentry.git
+cd CloudSentry
+```
+
+Create and activate a virtual environment.
+
+**Windows PowerShell:**
+
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+**Linux / macOS:**
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+```
+
+Install the pinned dependencies:
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Run the dashboard:
+
+```bash
+python -m streamlit run app.py
+```
+
+Streamlit will display the local URL in the terminal, typically `http://localhost:8501`.
+
+Demo mode is the default and works without AWS credentials.
+
+## AWS EC2 Deployment
+
+CloudSentry has been deployed to an Amazon EC2 instance using Amazon Linux 2023, Python 3.11, and Streamlit.
+
+### Deployment Configuration
+
+| Setting | Configuration |
+|---|---|
+| Cloud provider | AWS |
+| Compute service | Amazon EC2 |
+| Operating system | Amazon Linux 2023 |
+| Python version | Python 3.11 |
+| Application framework | Streamlit |
+| Application port | TCP 8501 |
+| Deployment mode | Public Demo mode |
+| AWS scanning | Disabled for the public demo |
+
+### Deployment Steps
+
+Install the required system packages on the EC2 instance:
+
+```bash
+sudo dnf install git python3.11 python3.11-pip -y
+```
+
+Clone the repository:
+
+```bash
+git clone https://github.com/mishty1536/CloudSentry.git
+cd CloudSentry
+```
+
+Create and activate the Python environment:
+
+```bash
+python3.11 -m venv .venv311
+source .venv311/bin/activate
+```
+
+Install the dependencies:
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Start Streamlit:
+
+```bash
+python -m streamlit run app.py \
+  --server.address 0.0.0.0 \
+  --server.port 8501
+```
+
+Configure the EC2 security group's inbound rules to allow TCP traffic on port 8501 for public demo access. SSH access on port 22 should remain restricted to trusted IP addresses.
+
+The Streamlit process must remain running for the application to be available. Automatic restart after an EC2 reboot has not been configured.
+
+### Public Deployment Security
+
+- Keep `CLOUDSENTRY_ENABLE_AWS_SCAN` unset on the public demo instance.
+- Do not place AWS credentials, access keys, tokens, or secrets in the source code or public repository.
+- Do not enable live AWS scanning on an unauthenticated public instance.
+- The current demo uses HTTP rather than HTTPS.
+- Public access to port 8501 allows anyone with network access to reach the application.
+- Review AWS billing and resource usage regularly. EC2 compute, storage, and public IPv4 usage may incur charges or consume account credits.
+- Stop the EC2 instance when the public demo is not required.
+
+For a production deployment, introduce appropriate authentication, HTTPS, access restrictions, logging, and operational monitoring before enabling sensitive functionality.
+
+## Enable AWS Read-only Scanning
+
+AWS mode is intended for a controlled, non-public environment only.
+
+To enable AWS mode, set the environment variable:
+
+**Linux / macOS:**
+
+```bash
+export CLOUDSENTRY_ENABLE_AWS_SCAN=true
+```
+
+**Windows PowerShell:**
+
+```powershell
+$env:CLOUDSENTRY_ENABLE_AWS_SCAN = "true"
+```
+
+Then start the application. AWS mode should only be enabled in an environment with appropriate access controls. AWS API calls begin only after the user explicitly presses **Start AWS scan**.
+
+CloudSentry uses Boto3's standard credential provider chain through `boto3.Session`. Use an approved credential provider, such as IAM Identity Center/SSO or an attached IAM role.
+
+Never paste access keys into CloudSentry, source files, Streamlit secrets, or this README. Do not commit credentials to GitHub.
+
+The application does not print or save AWS credentials.
+
+## Read-only IAM Permissions
+
+Attach a least-privilege policy like the following to the identity used by Boto3. Review and tailor the permissions to your environment before use.
 
 ```json
 {
@@ -67,37 +268,86 @@ Attach a least-privilege policy like the following to the identity used by Boto3
 }
 ```
 
-CloudSentry does not request write permissions. It does not create, update, or delete AWS resources. If a required read permission is missing, throttled, or unavailable, the affected check is reported as **Unknown / unverified**.
+The policy grants read-only access to the listed configuration APIs. It does not grant permission to create, update, or delete AWS resources.
 
-## AWS check coverage and limits
+If a required read permission is missing, throttled, or unavailable, the affected check is reported as **Unknown / unverified**.
 
-### S3
+## AWS Check Coverage and Limitations
 
-- Lists general-purpose buckets with `ListBuckets` and checks each returned bucket's bucket-level `GetPublicAccessBlock` and default `GetBucketEncryption` configuration.
-- These checks do not establish effective public access. Account-level and organization-level S3 Block Public Access controls are not queried. Bucket policies, ACLs, existing objects, and KMS key policies are not inspected.
-- If an explicit encryption configuration is absent, CloudSentry reports the configuration as unverified; it does not claim that objects are unencrypted. Existing object encryption is not inspected.
+### S3 Auditing
 
-### IAM
+- Lists general-purpose buckets with `ListBuckets`.
+- Checks each returned bucket's bucket-level `GetPublicAccessBlock` configuration.
+- Checks the bucket's default `GetBucketEncryption` configuration.
+- Does not establish effective public access. Account-level and organization-level S3 Block Public Access controls are not queried.
+- Does not inspect bucket policies, ACLs, existing objects, or KMS key policies.
+- If an explicit encryption configuration is absent, the configuration is reported as unverified. The application does not claim that objects are unencrypted.
+- Existing object encryption is not inspected.
 
-- `GetAccountSummary` checks the root account MFA indicator.
-- `GetAccountAuthorizationDetails` is paginated and supplies IAM users, groups, roles, inline identity policies, policy attachments, and managed policy documents. CloudSentry audits inline identity policy documents and the default version documents for attached managed policies returned by AWS. A missing or malformed document is unverified.
-- Role trust policies are not treated as identity permission policies. The checks do not evaluate permissions boundaries, session policies, SCPs/RCPs, resource-based policies, service control context, policy variables, or all condition semantics. They do not calculate effective permissions or replace IAM Access Analyzer or AWS policy evaluation.
-- Wildcard, `NotAction`, `NotResource`, and `Condition` findings are heuristic. `NotAction`, `NotResource`, and `Condition` are surfaced for contextual review rather than automatically labeled vulnerabilities.
+### IAM Auditing
 
-### CloudTrail
+- Uses `GetAccountSummary` to check the root account MFA indicator.
+- Uses paginated `GetAccountAuthorizationDetails` results to retrieve IAM users, groups, roles, inline identity policies, policy attachments, and managed policy documents.
+- Audits inline identity policy documents and the default version documents for attached managed policies returned by AWS.
+- Treats missing or malformed policy documents as unverified.
+- Does not treat role trust policies as identity permission policies.
+- Does not evaluate permissions boundaries, session policies, SCPs/RCPs, resource-based policies, service control context, policy variables, or all condition semantics.
+- Does not calculate effective permissions or replace IAM Access Analyzer or AWS policy evaluation.
+- Treats wildcard, `NotAction`, `NotResource`, and `Condition` findings as heuristic indicators. `NotAction`, `NotResource`, and `Condition` are surfaced for contextual review rather than automatically labeled vulnerabilities.
 
-- In the selected region, `DescribeTrails` includes shadow trails; `GetTrailStatus` checks whether each returned trail is currently logging. Trail multi-region configuration and log file validation are also checked.
-- CloudTrail status is regional. One scan does not verify logging status in every region. No trail returned in the selected region is reported as unverified for broader coverage.
-- Event selectors, destination bucket policies, KMS key policies, organization-wide coverage, and delivery-error fields are not evaluated by these checks.
+### CloudTrail Auditing
 
-The selected region is shown with AWS results. S3 bucket listing and IAM are account-level APIs, while CloudTrail checks apply to the selected region. The dashboard's prototype risk score keeps its existing formula; Unknown severities contribute zero points and remain in the denominator, so unverified results can lower the score. Review Unknown findings separately.
+- Uses `DescribeTrails` in the selected region, including shadow trails.
+- Uses `GetTrailStatus` to check whether each returned trail is currently logging.
+- Checks trail multi-region configuration and log file validation.
+- CloudTrail status is regional; one scan does not verify logging status in every AWS region.
+- If no trail is returned in the selected region, broader coverage is reported as unverified.
+- Does not evaluate event selectors, destination bucket policies, KMS key policies, organization-wide coverage, or delivery-error fields.
 
-## Offline tests
+### Region and Risk Score
 
-Run the complete test suite from the project root in the Windows virtual environment, without AWS credentials or network access:
+The selected AWS region is shown with AWS results. S3 bucket listing and IAM are account-level APIs, while CloudTrail checks apply to the selected region.
+
+The dashboard's prototype risk score retains its existing formula. Unknown severities contribute zero points and remain in the denominator, so unverified results can lower the score. Review Unknown findings separately; a lower score does not necessarily mean that the environment is secure.
+
+## Testing
+
+Run the complete test suite from the project root in the Windows virtual environment:
 
 ```powershell
 .venv\Scripts\python.exe -B -m unittest discover -s checks -v
 ```
 
-AWS integration tests use mocked clients and synthetic responses. They do not read credentials or call AWS.
+The AWS integration tests use mocked clients and synthetic responses. They do not read AWS credentials or call AWS APIs.
+
+Run tests after changing the audit logic, findings, or report-generation functionality.
+
+## Limitations
+
+CloudSentry is an educational prototype for selected AWS security configuration checks. It does not perform a complete cloud security assessment, penetration test, or formal compliance audit.
+
+Findings are based on the configuration information available to the application and the implemented heuristic rules. A missing finding does not guarantee that an AWS resource is secure.
+
+The tool should be used as an aid to security review, with results verified against AWS configuration and organizational security requirements.
+
+## Future Improvements
+
+Potential future enhancements include:
+
+- Authentication and role-based access control.
+- HTTPS and a custom domain for public deployments.
+- Persistent scan history and report storage.
+- Multi-region CloudTrail assessment.
+- Broader S3 effective-public-access analysis.
+- Expanded IAM policy evaluation and contextual findings.
+- Improved automated deployment and monitoring.
+
+These are possible enhancements and are not represented as completed features.
+
+## Repository
+
+GitHub: https://github.com/mishty1536/CloudSentry
+
+## Author
+
+Developed as a Cloud Computing & Security mini-project to explore AWS security misconfigurations, read-only auditing, and cloud application deployment.
