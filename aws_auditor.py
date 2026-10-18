@@ -221,11 +221,24 @@ def audit_s3_account(s3_client):
         except (BotoCoreError, ValueError) as error:
             findings.append(_operation_error("S3", "GetBucketEncryption", error, name))
 
+    
     if not buckets and listing_complete:
-        findings.append(_unverified(
-            "S3", "ListBuckets", "No buckets were returned. This confirms no bucket-level checks were performed."
-        ))
+        findings.append({
+            "service": "S3",
+            "resource": "Account",
+            "severity": "Info",
+            "finding": (
+                "No S3 buckets were returned by the account-level listing. "
+                "No bucket-level security checks were applicable."
+            ),
+            "recommendation": (
+                "No bucket-level checks were applicable because no buckets were returned. "
+                "Verify that the scan used the intended AWS account."
+            ),
+        })
+
     return findings
+
 
 
 def _collect_iam_authorization_details(iam_client):
@@ -349,11 +362,18 @@ def audit_iam_account(iam_client):
                 ))
                 continue
             entity_name = entity.get(name_key, "Unknown")
-            inline_policies = entity.get(inline_key)
-            if inline_policies is None and inline_key not in entity:
+            inline_policies = entity.get(inline_key, [])
+
+            if inline_policies is None:
+                inline_policies = []
+
+            if not isinstance(inline_policies, list):
                 policy_inventory_complete = False
                 findings.append(_unverified(
-                    "IAM", "GetAccountAuthorizationDetails", f"{inline_key} was missing for this {entity_type}; inline policies were not verified.", str(entity.get(name_key, "Unknown"))
+                    "IAM",
+                    "GetAccountAuthorizationDetails",
+                    f"Inline policies for this {entity_type} were malformed.",
+                    str(entity_name),
                 ))
                 inline_policies = []
             if not isinstance(inline_policies, list):

@@ -35,6 +35,43 @@ def empty_iam_authorization_details(**overrides):
 
 
 class AuditS3AccountTests(unittest.TestCase):
+    
+    def test_empty_bucket_list_is_reported_as_no_buckets(self):
+        s3 = Mock()
+        s3.list_buckets.return_value = {"Buckets": []}
+
+        findings = audit_s3_account(s3)
+
+        self.assertTrue(any(
+            "No S3 buckets were returned" in f["finding"]
+            for f in findings
+        ))
+        self.assertFalse(any(
+            f["severity"] == "Unknown"
+            and f.get("operation") == "ListBuckets"
+            for f in findings
+        ))
+
+    def test_empty_bucket_list_is_reported_as_no_buckets(self):
+        s3 = Mock()
+        s3.list_buckets.return_value = {"Buckets": []}
+
+        findings = audit_s3_account(s3)
+
+        s3 = Mock()
+        s3.list_buckets.return_value = {"Buckets": []}
+
+        findings = audit_s3_account(s3)
+
+        self.assertTrue(any(
+            "No S3 buckets were returned" in f["finding"]
+            for f in findings
+        ))
+        self.assertFalse(any(
+            f["severity"] == "Unknown"
+            and f["operation"] == "ListBuckets"
+            for f in findings
+        ))
     def test_successful_bucket_checks(self):
         s3 = Mock()
         s3.list_buckets.return_value = {"Buckets": [{"Name": "example-bucket"}]}
@@ -167,6 +204,26 @@ class AuditS3AccountTests(unittest.TestCase):
 
 
 class AuditIamAccountTests(unittest.TestCase):
+    def test_missing_optional_inline_policy_lists_are_treated_as_empty(self):
+        iam = Mock()
+        iam.get_account_summary.return_value = {
+            "SummaryMap": {"AccountMFAEnabled": 1}
+        }
+        iam.get_account_authorization_details.return_value = {
+            "IsTruncated": False,
+            "UserDetailList": [{"UserName": "CloudSentryUser"}],
+            "GroupDetailList": [],
+            "RoleDetailList": [],
+            "Policies": [],
+        }
+
+        findings = audit_iam_account(iam)
+
+        self.assertFalse(any(
+            f["severity"] == "Unknown"
+            and "UserPolicyList was missing" in f["finding"]
+            for f in findings
+        ))
     def test_successful_account_and_inline_and_managed_policy_checks(self):
         iam = Mock()
         iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 1}}
