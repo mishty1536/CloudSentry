@@ -6,33 +6,51 @@ def audit_cloudtrail_configuration(trail_config):
     """
     findings = []
 
-    if not trail_config.get("logging_enabled", False):
+    if not isinstance(trail_config, dict):
+        trail_config = {}
+
+    if trail_config.get("logging_enabled") is not True:
+        status = (
+            "CloudTrail logging is disabled"
+            if trail_config.get("logging_enabled") is False
+            else "CloudTrail logging status is missing or unconfirmed"
+        )
         findings.append({
             "service": "CloudTrail",
             "severity": "High",
-            "finding": "CloudTrail logging is disabled",
+            "finding": status,
             "recommendation": (
                 "Enable CloudTrail logging to record account activity "
                 "and support security investigations."
             )
         })
 
-    if not trail_config.get("log_validation_enabled", False):
+    if trail_config.get("log_validation_enabled") is not True:
+        status = (
+            "Log file integrity validation is disabled"
+            if trail_config.get("log_validation_enabled") is False
+            else "Log file integrity validation status is missing or unconfirmed"
+        )
         findings.append({
             "service": "CloudTrail",
             "severity": "Medium",
-            "finding": "Log file integrity validation is disabled",
+            "finding": status,
             "recommendation": (
                 "Enable log file integrity validation to help detect "
                 "changes to delivered CloudTrail log files."
             )
         })
 
-    if not trail_config.get("multi_region_enabled", False):
+    if trail_config.get("multi_region_enabled") is not True:
+        status = (
+            "Multi-region trail is not enabled"
+            if trail_config.get("multi_region_enabled") is False
+            else "Multi-region trail status is missing or unconfirmed"
+        )
         findings.append({
             "service": "CloudTrail",
             "severity": "Medium",
-            "finding": "Multi-region trail is not enabled",
+            "finding": status,
             "recommendation": (
                 "Consider configuring a multi-region trail to record "
                 "supported events across AWS Regions."

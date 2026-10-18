@@ -3,10 +3,23 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
+import re
+import os
+
+from botocore.exceptions import BotoCoreError
 
 from s3_auditor import audit_s3_configuration
 from iam_auditor import audit_iam_policy
 from cloudTrail_auditor import audit_cloudtrail_configuration
+from aws_auditor import audit_aws_account, create_aws_clients
+from dashboard_helpers import (
+    assessment_status,
+    calculate_risk_score,
+    classify_risk,
+    combine_findings,
+    count_severity,
+    make_findings_dataframe,
+)
 
 
 # ============================================================
@@ -76,82 +89,36 @@ st.write(
     "and review recommended security improvements."
 )
 
-st.info(
-    "Demo mode: Findings are generated from sample configurations. "
-    "No live AWS account is being scanned."
+aws_scan_enabled = os.environ.get("CLOUDSENTRY_ENABLE_AWS_SCAN", "").strip().lower() in {
+    "1", "true", "yes"
+}
+mode_options = ["Demo", "AWS (read-only)"] if aws_scan_enabled else ["Demo"]
+if st.session_state.get("operating_mode") not in mode_options:
+    st.session_state["operating_mode"] = "Demo"
+
+operating_mode = st.sidebar.radio(
+    "Operating mode",
+    options=mode_options,
+    key="operating_mode",
 )
 
+if operating_mode == "Demo":
+    st.info(
+        "Demo mode: Findings use sample configurations. "
+        "No AWS clients or AWS API calls are used."
+    )
+    if not aws_scan_enabled:
+        st.caption("AWS scanning is disabled in this Demo-only deployment.")
+else:
+    st.info(
+        "AWS mode performs read-only checks only after you press Start AWS scan. "
+        "Credentials come from Boto3's standard provider chain."
+    )
+
 
 # ============================================================
-# CONSTANTS AND HELPER FUNCTIONS
+# DISPLAY HELPERS
 # ============================================================
-
-SEVERITY_POINTS = {
-    "High": 10,
-    "Medium": 5,
-    "Low": 2,
-    "Info": 0
-}
-
-
-def count_severity(findings, severity):
-    """Count findings matching a severity."""
-    return sum(
-        1 for finding in findings
-        if finding.get("severity", "Info") == severity
-    )
-
-
-def calculate_risk_score(findings):
-    """
-    Prototype risk score based on average finding severity.
-    This is not an official AWS or industry-standard score.
-    """
-    if not findings:
-        return 0
-
-    total_points = sum(
-        SEVERITY_POINTS.get(finding.get("severity", "Info"), 0)
-        for finding in findings
-    )
-
-    maximum_points = len(findings) * 10
-
-    return round((total_points / maximum_points) * 100)
-
-
-def classify_risk(score):
-    if score >= 70:
-        return "High Risk"
-    elif score >= 35:
-        return "Moderate Risk"
-    return "Low Risk"
-
-
-def combine_findings(results):
-    """Combine all service findings into one list."""
-    return (
-        results.get("s3", [])
-        + results.get("iam", [])
-        + results.get("cloudtrail", [])
-    )
-
-
-def make_findings_dataframe(findings):
-    """Create a consistent table even when there are no findings."""
-    columns = ["service", "severity", "finding", "recommendation"]
-
-    if not findings:
-        return pd.DataFrame(columns=columns)
-
-    df = pd.DataFrame(findings)
-
-    for column in columns:
-        if column not in df.columns:
-            df[column] = ""
-
-    return df[columns]
-
 
 def display_dataframe(df, *, hide_index=True):
     """Render dataframes using the active CloudSentry palette."""
@@ -228,10 +195,12 @@ def run_audit(
     """Run the three local demo auditors."""
 
     s3_config = {
-        "BlockPublicAcls": block_public_acls,
-        "IgnorePublicAcls": ignore_public_acls,
-        "BlockPublicPolicy": block_public_policy,
-        "RestrictPublicBuckets": restrict_public_buckets,
+        "block_public_access": {
+            "BlockPublicAcls": block_public_acls,
+            "IgnorePublicAcls": ignore_public_acls,
+            "BlockPublicPolicy": block_public_policy,
+            "RestrictPublicBuckets": restrict_public_buckets
+        },
         "encryption_enabled": encryption_enabled
     }
 
@@ -283,145 +252,144 @@ if "scan_number" not in st.session_state:
 
 
 # ============================================================
-# SECURITY SCAN CONFIGURATION FORM
+# MODE-SPECIFIC SCAN CONFIGURATION
 # ============================================================
 
-st.divider()
-st.header("⚙️ Security Scan Configuration")
-
-with st.form("security_scan_form"):
-
-    st.subheader("🪣 S3 Security Settings")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        block_public_acls = st.checkbox(
-            "Block public ACLs",
-            value=True
-        )
-
-        ignore_public_acls = st.checkbox(
-            "Ignore public ACLs",
-            value=True
-        )
-
-        block_public_policy = st.checkbox(
-            "Block public bucket policies",
-            value=True
-        )
-
-    with col2:
-        restrict_public_buckets = st.checkbox(
-            "Restrict public buckets",
-            value=True
-        )
-
-        encryption_enabled = st.checkbox(
-            "Enable default bucket encryption",
-            value=True
-        )
-
+if operating_mode == "Demo":
     st.divider()
-    st.subheader("🔑 IAM Permission Settings")
+    st.header("⚙️ Security Scan Configuration")
 
-    col1, col2 = st.columns(2)
+    with st.form("security_scan_form"):
+        st.subheader("🪣 S3 Security Settings")
+        col1, col2 = st.columns(2)
 
-    with col1:
-        allow_all_actions = st.checkbox(
-            "Allow all actions (*)",
-            value=False
+        with col1:
+            block_public_acls = st.checkbox("Block public ACLs", value=True)
+            ignore_public_acls = st.checkbox("Ignore public ACLs", value=True)
+            block_public_policy = st.checkbox("Block public bucket policies", value=True)
+
+        with col2:
+            restrict_public_buckets = st.checkbox("Restrict public buckets", value=True)
+            encryption_enabled = st.checkbox("Enable default bucket encryption", value=True)
+
+        st.divider()
+        st.subheader("🔑 IAM Permission Settings")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            allow_all_actions = st.checkbox("Allow all actions (*)", value=False)
+        with col2:
+            allow_all_resources = st.checkbox("Apply permissions to all resources (*)", value=False)
+
+        st.caption(
+            "Uncheck wildcard permissions to simulate a more restrictive "
+            "sample IAM policy."
         )
 
-    with col2:
-        allow_all_resources = st.checkbox(
-            "Apply permissions to all resources (*)",
-            value=False
+        st.divider()
+        st.subheader("📜 CloudTrail Logging Settings")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            logging_enabled = st.checkbox("CloudTrail logging enabled", value=True)
+        with col2:
+            log_validation_enabled = st.checkbox(
+                "Log file integrity validation enabled", value=True
+            )
+        with col3:
+            multi_region_enabled = st.checkbox("Multi-region trail enabled", value=True)
+
+        scan_clicked = st.form_submit_button(
+            "🔍 Scan Configuration",
+            type="primary",
+            use_container_width=True,
         )
-
-    st.caption(
-        "Uncheck wildcard permissions to simulate a more restrictive "
-        "sample IAM policy."
-    )
-
+    selected_region = None
+else:
     st.divider()
-    st.subheader("📜 CloudTrail Logging Settings")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        logging_enabled = st.checkbox(
-            "CloudTrail logging enabled",
-            value=True
+    st.header("🔐 AWS Read-only Scan")
+    with st.form("aws_scan_form"):
+        selected_region = st.text_input(
+            "AWS region",
+            value=st.session_state.get("aws_region", "us-east-1"),
+            help="CloudTrail checks apply to this region. Other regions are not scanned.",
+        ).strip()
+        scan_clicked = st.form_submit_button(
+            "Start AWS scan",
+            type="primary",
+            use_container_width=True,
         )
-
-    with col2:
-        log_validation_enabled = st.checkbox(
-            "Log file integrity validation enabled",
-            value=True
-        )
-
-    with col3:
-        multi_region_enabled = st.checkbox(
-            "Multi-region trail enabled",
-            value=True
-        )
-
-    scan_clicked = st.form_submit_button(
-        "🔍 Scan Configuration",
-        type="primary",
-        use_container_width=True
-    )
-
+    if selected_region:
+        st.session_state["aws_region"] = selected_region
 
 # ============================================================
 # EXECUTE SCAN AND STORE RESULTS
 # ============================================================
 
 if scan_clicked:
-
-    new_results = run_audit(
-        block_public_acls,
-        ignore_public_acls,
-        block_public_policy,
-        restrict_public_buckets,
-        encryption_enabled,
-        allow_all_actions,
-        allow_all_resources,
-        logging_enabled,
-        log_validation_enabled,
-        multi_region_enabled
-    )
-
-    # Preserve the last completed scan for comparison.
-    if st.session_state["scan_results"] is not None:
-        st.session_state["previous_scan_results"] = (
-            st.session_state["scan_results"]
+    new_results = None
+    if operating_mode == "Demo":
+        new_results = run_audit(
+            block_public_acls,
+            ignore_public_acls,
+            block_public_policy,
+            restrict_public_buckets,
+            encryption_enabled,
+            allow_all_actions,
+            allow_all_resources,
+            logging_enabled,
+            log_validation_enabled,
+            multi_region_enabled,
         )
+    elif operating_mode == "AWS (read-only)" and not aws_scan_enabled:
+        st.error("AWS scanning is disabled in this deployment.")
+    elif not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", selected_region or ""):
+        st.error("Enter a valid AWS region name, such as us-east-1.")
+    else:
+        try:
+            s3_client, iam_client, cloudtrail_client = create_aws_clients(selected_region)
+            new_results = audit_aws_account(
+                s3_client, iam_client, cloudtrail_client, selected_region
+            )
+        except (BotoCoreError, ValueError):
+            st.error(
+                "AWS clients could not be initialized. Check the region and "
+                "local AWS credential provider configuration; no credentials "
+                "are displayed or stored."
+            )
 
-    st.session_state["scan_results"] = new_results
-    st.session_state["scan_number"] += 1
+    if new_results is not None:
+        previous_mode = st.session_state.get("scan_mode")
+        if (
+            st.session_state["scan_results"] is not None
+            and previous_mode == operating_mode
+        ):
+            st.session_state["previous_scan_results"] = st.session_state["scan_results"]
+        else:
+            st.session_state["previous_scan_results"] = None
 
-    all_new_findings = combine_findings(new_results)
-    new_risk_score = calculate_risk_score(all_new_findings)
+        st.session_state["scan_results"] = new_results
+        st.session_state["scan_mode"] = operating_mode
+        st.session_state["scan_region"] = selected_region
+        st.session_state["scan_number"] += 1
 
-    history_record = {
-        "Scan Number": st.session_state["scan_number"],
-        "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Total Findings": len(all_new_findings),
-        "High Severity": count_severity(all_new_findings, "High"),
-        "Medium Severity": count_severity(all_new_findings, "Medium"),
-        "Risk Score": new_risk_score
-    }
-
-    st.session_state["scan_history"].append(history_record)
-
-    # Keep the most recent 20 scans in this session.
-    st.session_state["scan_history"] = (
-        st.session_state["scan_history"][-20:]
-    )
-
-    st.success("Security scan completed successfully!")
+        all_new_findings = combine_findings(new_results)
+        new_risk_score = calculate_risk_score(all_new_findings)
+        history_record = {
+            "Scan Number": st.session_state["scan_number"],
+            "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Mode": operating_mode,
+            "Region": selected_region or "Demo",
+            "Total Findings": len(all_new_findings),
+            "High Severity": count_severity(all_new_findings, "High"),
+            "Medium Severity": count_severity(all_new_findings, "Medium"),
+            "Unknown / Unverified": count_severity(all_new_findings, "Unknown"),
+            "Assessment Status": assessment_status(all_new_findings),
+            "Risk Score": new_risk_score,
+        }
+        st.session_state["scan_history"].append(history_record)
+        st.session_state["scan_history"] = st.session_state["scan_history"][-20:]
+        st.success("Security scan completed. Review any Unknown findings as unverified.")
 
 
 # ============================================================
@@ -430,12 +398,24 @@ if scan_clicked:
 
 results = st.session_state["scan_results"]
 
-if results is None:
-    st.info(
-        "Configure the sample settings above and click "
-        "'Scan Configuration' to view the security assessment."
-    )
+if results is None or st.session_state.get("scan_mode") != operating_mode:
+    if results is None:
+        st.info("Choose an operating mode and explicitly start a scan to view results.")
+    else:
+        st.info(f"No {operating_mode} results are available yet. Start a scan in this mode.")
     st.stop()
+
+if not isinstance(results, dict):
+    results = {"unexpected_results": results}
+
+if operating_mode == "AWS (read-only)":
+    st.info(
+        f"AWS read-only scan region: {st.session_state.get('scan_region', 'Unknown')}. "
+        "S3 checks cover bucket-level public access and encryption settings only; "
+        "they do not establish effective account-wide or organization-wide public access. "
+        "CloudTrail status is regional and does not verify every AWS region. "
+        "IAM results inspect returned identity policy documents and do not calculate effective permissions."
+    )
 
 
 all_findings = combine_findings(results)
@@ -444,6 +424,8 @@ findings_df = make_findings_dataframe(all_findings)
 high_count = count_severity(all_findings, "High")
 medium_count = count_severity(all_findings, "Medium")
 low_count = count_severity(all_findings, "Low")
+unknown_count = count_severity(all_findings, "Unknown")
+current_assessment_status = assessment_status(all_findings)
 
 risk_score = calculate_risk_score(all_findings)
 risk_classification = classify_risk(risk_score)
@@ -481,13 +463,25 @@ col4.metric("Medium Severity", medium_count)
 st.divider()
 st.header("📈 Security Posture Summary")
 
-col1, col2 = st.columns(2)
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     st.metric("Overall Risk Score", f"{risk_score}/100")
 
 with col2:
     st.metric("Risk Classification", risk_classification)
+
+with col3:
+    st.metric("Unknown / Unverified", unknown_count)
+
+with col4:
+    st.metric("Assessment Status", current_assessment_status)
+
+if current_assessment_status == "Incomplete":
+    st.warning(
+        f"Assessment incomplete: {unknown_count} finding(s) are Unknown / unverified. "
+        "The risk score is not proof that the configuration is secure."
+    )
 
 st.progress(risk_score / 100)
 
@@ -505,9 +499,14 @@ st.caption(
 st.divider()
 st.header("📉 Security Risk Trend")
 
-if len(st.session_state["scan_history"]) >= 2:
+mode_history = [
+    record for record in st.session_state["scan_history"]
+    if record.get("Mode", "Demo") == operating_mode
+]
 
-    trend_df = pd.DataFrame(st.session_state["scan_history"])
+if len(mode_history) >= 2:
+
+    trend_df = pd.DataFrame(mode_history)
 
     chart_df = trend_df.set_index("Scan Number")[["Risk Score"]]
 
@@ -632,33 +631,9 @@ else:
 st.divider()
 st.header("🔎 Filter Security Findings")
 
-# Combine findings from all three services
+# Combine and normalize findings while retaining unexpected entries/fields.
 scan_results = st.session_state.get("scan_results", {})
-
-all_findings = (
-    scan_results.get("s3", [])
-    + scan_results.get("iam", [])
-    + scan_results.get("cloudtrail", [])
-)
-
-all_findings = [
-    finding for finding in all_findings
-    if isinstance(finding, dict)
-    and any(
-        value is not None and str(value).strip()
-        for value in finding.values()
-    )
-]
-
-# Remove empty or invalid findings
-all_findings = [
-    finding for finding in all_findings
-    if isinstance(finding, dict)
-    and any(
-        value is not None and str(value).strip()
-        for value in finding.values()
-    )
-]
+all_findings = combine_findings(scan_results)
 
 if all_findings:
     findings_df = pd.DataFrame(all_findings)
@@ -731,19 +706,28 @@ st.divider()
 st.header("🪣 S3 Security Findings")
 st.write("Checks public access protection and default encryption.")
 
-display_dataframe(make_findings_dataframe(results["s3"]), hide_index=True)
+display_dataframe(
+    make_findings_dataframe(combine_findings({"s3": results.get("s3", [])})),
+    hide_index=True,
+)
 
 st.divider()
 st.header("🔑 IAM Permission Findings")
 st.write("Checks sample IAM policies for potentially broad permissions.")
 
-display_dataframe(make_findings_dataframe(results["iam"]), hide_index=True)
+display_dataframe(
+    make_findings_dataframe(combine_findings({"iam": results.get("iam", [])})),
+    hide_index=True,
+)
 
 st.divider()
 st.header("📜 CloudTrail Logging Findings")
 st.write("Checks sample activity logging and trail configuration.")
 
-display_dataframe(make_findings_dataframe(results["cloudtrail"]), hide_index=True)
+display_dataframe(
+    make_findings_dataframe(combine_findings({"cloudtrail": results.get("cloudtrail", [])})),
+    hide_index=True,
+)
 
 
 # ============================================================
@@ -843,11 +827,15 @@ if not report_df.empty:
     summary_report = pd.DataFrame(
         [
             {"Metric": "Scan Number", "Value": st.session_state["scan_number"]},
+            {"Metric": "Mode", "Value": operating_mode},
+            {"Metric": "Region", "Value": st.session_state.get("scan_region") or "Demo"},
             {"Metric": "Services Audited", "Value": 3},
             {"Metric": "Total Findings", "Value": len(all_findings)},
             {"Metric": "High Severity", "Value": high_count},
             {"Metric": "Medium Severity", "Value": medium_count},
             {"Metric": "Low Severity", "Value": low_count},
+            {"Metric": "Unknown / Unverified Findings", "Value": unknown_count},
+            {"Metric": "Assessment Status", "Value": current_assessment_status},
             {"Metric": "Risk Score", "Value": risk_score},
             {"Metric": "Risk Classification", "Value": risk_classification}
         ]
@@ -863,10 +851,13 @@ if not report_df.empty:
         use_container_width=True
     )
 
-    st.caption(
-        "Reports contain results from the latest completed scan. "
-        "They are generated from sample configurations in demo mode."
-    )
+    if operating_mode == "Demo":
+        st.caption("Reports contain results from the latest demo scan using sample configurations.")
+    else:
+        st.caption(
+            "Reports contain results from the latest read-only AWS scan. "
+            "Unknown findings mean a check could not be verified."
+        )
 
 else:
     st.success("No security findings to export.")
@@ -878,7 +869,7 @@ else:
 
 st.divider()
 
-st.caption(
-    "CloudSentry | Educational Cloud Security Prototype | "
-    "Demo mode only — no live AWS resources are scanned or modified."
-)
+if operating_mode == "Demo":
+    st.caption("CloudSentry | Educational Cloud Security Prototype | Demo mode uses sample data only.")
+else:
+    st.caption("CloudSentry | AWS mode is read-only and limited to the documented scan coverage.")

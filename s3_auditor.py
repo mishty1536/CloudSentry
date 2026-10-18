@@ -8,8 +8,15 @@ def audit_s3_configuration(bucket_config):
 
     findings = []
 
+    # Treat absent or malformed input as unconfirmed settings. This keeps the
+    # auditor fail-safe without raising when configuration data is incomplete.
+    if not isinstance(bucket_config, dict):
+        bucket_config = {}
+
     # Check Block Public Access
     public_access = bucket_config.get("block_public_access", {})
+    if not isinstance(public_access, dict):
+        public_access = {}
 
     public_settings = [
         "BlockPublicAcls",
@@ -18,7 +25,7 @@ def audit_s3_configuration(bucket_config):
         "RestrictPublicBuckets"
     ]
 
-    if not all(public_access.get(setting, False) for setting in public_settings):
+    if not all(public_access.get(setting) is True for setting in public_settings):
         findings.append({
             "service": "S3",
             "severity": "High",
@@ -30,7 +37,7 @@ def audit_s3_configuration(bucket_config):
         })
 
     # Check default encryption
-    if not bucket_config.get("encryption_enabled", False):
+    if bucket_config.get("encryption_enabled") is not True:
         findings.append({
             "service": "S3",
             "severity": "Medium",
