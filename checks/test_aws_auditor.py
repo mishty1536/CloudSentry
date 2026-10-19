@@ -1,9 +1,12 @@
 import json
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import Mock
 from urllib.parse import quote
 
+import boto3
 from botocore.exceptions import ClientError
+from botocore.stub import Stubber
 
 from aws_auditor import (
     audit_aws_account,
@@ -416,6 +419,74 @@ class AuditCloudTrailRegionTests(unittest.TestCase):
 
 
 class AuditAwsAccountTests(unittest.TestCase):
+    def test_successful_scan_uses_current_botocore_request_and_response_models(self):
+        # Explicit dummy credentials prevent credential-provider lookup. Every
+        # API response is served by Stubber; no network or AWS account is used.
+        session = boto3.Session(
+            aws_access_key_id="unit-test-key",
+            aws_secret_access_key="unit-test-secret",
+            region_name="ap-southeast-2",
+        )
+        s3 = session.client("s3")
+        iam = session.client("iam")
+        cloudtrail = session.client("cloudtrail")
+        s3_stub = Stubber(s3)
+        iam_stub = Stubber(iam)
+        cloudtrail_stub = Stubber(cloudtrail)
+
+        s3_stub.add_response(
+            "list_buckets",
+            {
+                "Buckets": [{
+                    "Name": "unit-test-bucket",
+                    "CreationDate": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                }],
+                "Owner": {"DisplayName": "Unit Test", "ID": "unit-test-owner"},
+            },
+            {"MaxBuckets": 1000},
+        )
+        s3_stub.add_response(
+            "get_public_access_block",
+            {"PublicAccessBlockConfiguration": {
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            }},
+            {"Bucket": "unit-test-bucket"},
+        )
+        s3_stub.add_response(
+            "get_bucket_encryption",
+            {"ServerSideEncryptionConfiguration": {
+                "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
+            }},
+            {"Bucket": "unit-test-bucket"},
+        )
+        iam_stub.add_response(
+            "get_account_summary",
+            {"SummaryMap": {"AccountMFAEnabled": 1}},
+            {},
+        )
+        iam_stub.add_response(
+            "get_account_authorization_details",
+            empty_iam_authorization_details(),
+            {"Filter": ["User", "Group", "Role", "LocalManagedPolicy", "AWSManagedPolicy"], "MaxItems": 1000},
+        )
+        cloudtrail_stub.add_response(
+            "describe_trails",
+            {"trailList": []},
+            {"includeShadowTrails": True},
+        )
+
+        with s3_stub, iam_stub, cloudtrail_stub:
+            results = audit_aws_account(s3, iam, cloudtrail, "ap-southeast-2")
+            s3_stub.assert_no_pending_responses()
+            iam_stub.assert_no_pending_responses()
+            cloudtrail_stub.assert_no_pending_responses()
+
+        self.assertEqual(set(results), {"s3", "iam", "cloudtrail"})
+        self.assertFalse(any(item["severity"] == "Unknown" for values in results.values() for item in values))
+
     def test_orchestrator_uses_only_injected_clients(self):
         s3 = Mock(list_buckets=Mock(return_value={"Buckets": []}))
         iam = Mock()

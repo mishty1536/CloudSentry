@@ -1,7 +1,9 @@
 import inspect
+import logging
 import math
 import os
 import re
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +23,20 @@ from dashboard_helpers import (
     count_severity,
     make_findings_dataframe,
 )
+
+aws_scan_logger = logging.getLogger("cloudsentry.aws_scan")
+
+
+def log_aws_scan_exception(error, *, phase, region):
+    """Log traceback frames without exception text or local variable values."""
+    stack = "".join(traceback.format_tb(error.__traceback__))
+    aws_scan_logger.error(
+        "Unexpected AWS scan failure: phase=%s region=%s exception_type=%s\n%s",
+        phase,
+        region,
+        type(error).__name__,
+        stack,
+    )
 
 
 # ============================================================
@@ -459,6 +475,7 @@ if scan_clicked:
     elif not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", selected_region or ""):
         st.error("Enter a valid AWS region name, such as us-east-1.")
     else:
+        scan_phase = "AWS client initialization"
         try:
             with st.spinner(f"Running read-only AWS security scan in {selected_region}..."):
                 s3_client, iam_client, cloudtrail_client = create_aws_clients(
@@ -467,6 +484,7 @@ if scan_clicked:
                     aws_secret_access_key=aws_secret_key or None,
                     aws_session_token=aws_session_token or None,
                 )
+                scan_phase = "S3, IAM, and CloudTrail audit operations"
                 new_results = audit_aws_account(
                     s3_client, iam_client, cloudtrail_client, selected_region
                 )
@@ -477,6 +495,9 @@ if scan_clicked:
                 "are displayed or stored."
             )
         except Exception as error:  # noqa: BLE001 - keep the dashboard alive on any failure
+            log_aws_scan_exception(
+                error, phase=scan_phase, region=selected_region
+            )
             st.error(
                 f"AWS scan failed unexpectedly ({type(error).__name__}). "
                 "Check the service logs for details; no credentials are displayed or stored."

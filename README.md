@@ -214,6 +214,12 @@ $env:CLOUDSENTRY_ENABLE_AWS_SCAN = "true"
 
 Then start the application. AWS mode should only be enabled in an environment with appropriate access controls. AWS API calls begin only after the user explicitly presses **Start AWS scan**.
 
+Unexpected Python exceptions during an AWS scan are written to the application service log with the scan phase, selected region, exception type, and traceback frames. Exception messages and local variable values are omitted to avoid logging credentials or request data. On the EC2 systemd deployment, inspect recent diagnostics with:
+
+```bash
+sudo journalctl -u cloudsentry.service -n 100 --no-pager
+```
+
 CloudSentry uses Boto3's standard credential provider chain through `boto3.Session`. Use an approved credential provider, such as IAM Identity Center/SSO or an attached IAM role.
 
 Never paste access keys into CloudSentry, source files, Streamlit secrets, or this README. Do not commit credentials to GitHub.
@@ -318,7 +324,7 @@ Run the complete test suite from the project root in the Windows virtual environ
 .venv\Scripts\python.exe -B -m unittest discover -s checks -v
 ```
 
-The AWS integration tests use mocked clients and synthetic responses. They do not read AWS credentials or call AWS APIs.
+The AWS integration tests use mocked clients, synthetic responses, and Botocore `Stubber` clients with dummy test credentials. They do not read AWS credentials or call AWS APIs.
 
 Run tests after changing the audit logic, findings, or report-generation functionality.
 

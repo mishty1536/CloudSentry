@@ -164,13 +164,48 @@ class AppIntegrationTests(unittest.TestCase):
         mode_radio = self._get_operating_mode_radio(at)
         mode_radio.set_value("AWS (read-only)").run()
 
-        # Simulate exception during create_aws_clients
-        with patch("aws_auditor.create_aws_clients", side_effect=Exception("No credentials found")):
-            btn = self._get_button_by_label(at, "Start AWS scan")
-            btn.click().run()
-            self.assertFalse(at.exception)
-            # Verify error alert is displayed
-            self.assertTrue(any("AWS scan failed" in err.value for err in at.error))
+        # Simulate an unexpected client-construction failure. The diagnostic
+        # must include traceback context without logging exception contents.
+        secret_sentinel = "TEST-SECRET-DO-NOT-LOG"
+        with self.assertLogs("cloudsentry.aws_scan", level="ERROR") as captured:
+            with patch(
+                "aws_auditor.create_aws_clients",
+                side_effect=TypeError(secret_sentinel),
+            ):
+                btn = self._get_button_by_label(at, "Start AWS scan")
+                btn.click().run()
+        self.assertFalse(at.exception)
+        self.assertTrue(any("AWS scan failed" in err.value for err in at.error))
+        diagnostic = "\n".join(captured.output)
+        self.assertIn("phase=AWS client initialization", diagnostic)
+        self.assertIn("exception_type=TypeError", diagnostic)
+        self.assertIn("app.py", diagnostic)
+        self.assertNotIn(secret_sentinel, diagnostic)
+
+    def test_aws_auditor_failure_logs_audit_phase_without_exception_text(self):
+        aws_enabled = patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "true"})
+        aws_enabled.start()
+        self.addCleanup(aws_enabled.stop)
+        at = AppTest.from_file(self.app_path, default_timeout=15)
+        at.run()
+        mode_radio = self._get_operating_mode_radio(at)
+        mode_radio.set_value("AWS (read-only)").run()
+
+        secret_sentinel = "TEST-SESSION-TOKEN-DO-NOT-LOG"
+        with self.assertLogs("cloudsentry.aws_scan", level="ERROR") as captured:
+            with (
+                patch("aws_auditor.create_aws_clients", return_value=(Mock(), Mock(), Mock())),
+                patch("aws_auditor.audit_aws_account", side_effect=TypeError(secret_sentinel)),
+            ):
+                btn = self._get_button_by_label(at, "Start AWS scan")
+                btn.click().run()
+
+        self.assertFalse(at.exception)
+        diagnostic = "\n".join(captured.output)
+        self.assertIn("phase=S3, IAM, and CloudTrail audit operations", diagnostic)
+        self.assertIn("exception_type=TypeError", diagnostic)
+        self.assertIn("app.py", diagnostic)
+        self.assertNotIn(secret_sentinel, diagnostic)
 
 
 if __name__ == "__main__":
