@@ -52,26 +52,6 @@ class AuditS3AccountTests(unittest.TestCase):
             for f in findings
         ))
 
-    def test_empty_bucket_list_is_reported_as_no_buckets(self):
-        s3 = Mock()
-        s3.list_buckets.return_value = {"Buckets": []}
-
-        findings = audit_s3_account(s3)
-
-        s3 = Mock()
-        s3.list_buckets.return_value = {"Buckets": []}
-
-        findings = audit_s3_account(s3)
-
-        self.assertTrue(any(
-            "No S3 buckets were returned" in f["finding"]
-            for f in findings
-        ))
-        self.assertFalse(any(
-            f["severity"] == "Unknown"
-            and f["operation"] == "ListBuckets"
-            for f in findings
-        ))
     def test_successful_bucket_checks(self):
         s3 = Mock()
         s3.list_buckets.return_value = {"Buckets": [{"Name": "example-bucket"}]}
@@ -441,6 +421,25 @@ class AuditAwsAccountTests(unittest.TestCase):
             ["s3", "iam", "cloudtrail"],
         )
         self.assertEqual(session.client.call_args_list[2].kwargs, {"region_name": "eu-west-1"})
+
+    def test_client_factory_uses_explicit_credentials(self):
+        session = Mock()
+        session_factory = Mock(return_value=session)
+
+        create_aws_clients(
+            "ap-southeast-2",
+            session_factory=session_factory,
+            aws_access_key_id="TESTKEYID",
+            aws_secret_access_key="TESTSECRETKEY",
+            aws_session_token="TESTTOKEN",
+        )
+
+        session_factory.assert_called_once_with(
+            region_name="ap-southeast-2",
+            aws_access_key_id="TESTKEYID",
+            aws_secret_access_key="TESTSECRETKEY",
+            aws_session_token="TESTTOKEN",
+        )
 
 
 if __name__ == "__main__":

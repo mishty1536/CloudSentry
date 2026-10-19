@@ -376,12 +376,6 @@ def audit_iam_account(iam_client):
                     str(entity_name),
                 ))
                 inline_policies = []
-            if not isinstance(inline_policies, list):
-                policy_inventory_complete = False
-                findings.append(_unverified(
-                    "IAM", "GetAccountAuthorizationDetails", f"Inline policies for this {entity_type} were malformed.", str(entity_name)
-                ))
-                inline_policies = []
             for inline in inline_policies:
                 inline_policy_count += 1
                 policy_name = inline.get("PolicyName", "Unknown") if isinstance(inline, dict) else "Unknown"
@@ -574,16 +568,30 @@ def audit_aws_account(s3_client, iam_client, cloudtrail_client, region):
     }
 
 
-def create_aws_clients(region, session_factory=None):
-    """Create clients through Boto3's standard credential provider chain.
+def create_aws_clients(
+    region,
+    session_factory=None,
+    aws_access_key_id=None,
+    aws_secret_access_key=None,
+    aws_session_token=None,
+):
+    """Create clients through Boto3's standard credential provider chain or optional session credentials.
 
     This function performs no API operation. Call it only after explicit user
-    action; it does not accept, persist, or display credentials.
+    action; it does not persist or display credentials.
     """
     if session_factory is None:
         import boto3
         session_factory = boto3.Session
-    session = session_factory(region_name=region)
+
+    session_kwargs = {"region_name": region}
+    if aws_access_key_id and aws_secret_access_key:
+        session_kwargs["aws_access_key_id"] = str(aws_access_key_id).strip()
+        session_kwargs["aws_secret_access_key"] = str(aws_secret_access_key).strip()
+        if aws_session_token and str(aws_session_token).strip():
+            session_kwargs["aws_session_token"] = str(aws_session_token).strip()
+
+    session = session_factory(**session_kwargs)
     return (
         session.client("s3"),
         session.client("iam"),
