@@ -1,4 +1,6 @@
+import html
 import inspect
+import io
 import logging
 import math
 import os
@@ -10,6 +12,11 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from botocore.exceptions import BotoCoreError, ClientError
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
 
 from s3_auditor import audit_s3_configuration
 from iam_auditor import audit_iam_policy
@@ -64,13 +71,13 @@ st.set_page_config(
 if "theme_mode" not in st.session_state:
     st.session_state.theme_mode = "Dark"
 
-st.sidebar.subheader("🎨 Appearance")
+st.sidebar.subheader("Appearance")
 
 st.sidebar.radio(
     "Choose theme",
     options=["Dark", "Light"],
     key="theme_mode",
-    format_func=lambda mode: "🌙 Dark Mode" if mode == "Dark" else "☀️ Light Mode",
+    format_func=lambda mode: f"{mode} Mode",
 )
 
 theme_css = Path(__file__).parent / "theme.css"
@@ -109,7 +116,7 @@ st.markdown(
     """
     <div class="cs-hero">
         <div class="cs-eyebrow">CLOUD SECURITY • THREAT MONITORING</div>
-        <h1 class="cs-hero-title">🛡️ CloudSentry</h1>
+        <h1 class="cs-hero-title">CloudSentry</h1>
         <p class="cs-hero-subtitle">AWS Misconfiguration Detection &amp; Risk Assessment</p>
     </div>
     """,
@@ -182,6 +189,133 @@ REMEDIATION_STEPS = {
 }
 
 
+PDF_COLUMN_WEIGHTS = {
+    "service": 1.0,
+    "severity": 1.0,
+    "region": 1.0,
+    "resource": 2.0,
+    "finding": 3.5,
+    "recommendation": 3.5,
+    "policy_name": 1.8,
+    "policy_type": 1.2,
+    "attached_to": 1.5,
+    "metric": 2.0,
+    "value": 2.5,
+}
+
+
+def generate_pdf_report(title, df, subtitle=None, landscape_mode=True):
+    """Generate a formatted PDF report from a pandas DataFrame."""
+    buffer = io.BytesIO()
+    pagesize = landscape(letter) if landscape_mode else letter
+    margin = 30 if landscape_mode else 36
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=pagesize,
+        rightMargin=margin,
+        leftMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin + 15,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=20,
+        textColor=colors.HexColor("#0E1728"),
+    )
+    subtitle_style = ParagraphStyle(
+        "ReportSubtitle",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#64748B"),
+    )
+    header_cell_style = ParagraphStyle(
+        "HeaderCell",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        leading=10,
+        textColor=colors.white,
+    )
+    body_cell_style = ParagraphStyle(
+        "BodyCell",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#1E293B"),
+    )
+
+    story = []
+    story.append(Paragraph(html.escape(title), title_style))
+    story.append(Spacer(1, 4))
+
+    meta_parts = []
+    if subtitle:
+        meta_parts.append(subtitle)
+    meta_parts.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    story.append(Paragraph(html.escape(" | ".join(meta_parts)), subtitle_style))
+    story.append(Spacer(1, 14))
+
+    if df is None or df.empty:
+        story.append(Paragraph("No records found.", body_cell_style))
+    else:
+        headers = [
+            Paragraph(f"<b>{html.escape(str(col).replace('_', ' ').title())}</b>", header_cell_style)
+            for col in df.columns
+        ]
+        data = [headers]
+
+        for _, row in df.iterrows():
+            row_cells = []
+            for col in df.columns:
+                val = row[col]
+                text = "" if pd.isna(val) else str(val)
+                row_cells.append(Paragraph(html.escape(text), body_cell_style))
+            data.append(row_cells)
+
+        usable_width = pagesize[0] - (2 * margin)
+        weights = [PDF_COLUMN_WEIGHTS.get(str(col).lower(), 1.5) for col in df.columns]
+        total_weight = sum(weights)
+        col_widths = [(w / total_weight) * usable_width for w in weights] if total_weight > 0 else None
+
+        table = Table(data, colWidths=col_widths, repeatRows=1)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1B3150")),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 5),
+            ('TOPPADDING', (0, 0), (-1, 0), 5),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
+            ('TOPPADDING', (0, 1), (-1, -1), 4),
+        ]))
+        story.append(table)
+
+    def _draw_page_decorations(canvas, doc_obj):
+        canvas.saveState()
+        canvas.setFont('Helvetica', 8)
+        canvas.setFillColor(colors.HexColor("#64748B"))
+        canvas.drawString(margin, 15, "CloudSentry | Cloud Security Misconfiguration Auditor")
+        page_num = canvas.getPageNumber()
+        canvas.drawRightString(pagesize[0] - margin, 15, f"Page {page_num}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_draw_page_decorations, onLaterPages=_draw_page_decorations)
+    return buffer.getvalue()
+
+
+
 def stretch_kwargs(widget):
     """Return the full-width argument supported by the installed Streamlit version."""
     try:
@@ -230,7 +364,7 @@ def display_dataframe(df, *, hide_index=True):
 
     df, has_shortened_values = prepare_dataframe_for_display(df)
     if has_shortened_values:
-        st.caption("Long resource and recommendation cells are shortened in this table; CSV exports retain the full values.")
+        st.caption("Long resource and recommendation cells are shortened in this table; PDF exports retain the full values.")
 
     dark_mode = st.session_state.get("theme_mode", "Dark") == "Dark"
     if dark_mode:
@@ -371,10 +505,10 @@ aws_session_token = ""
 
 if operating_mode == "Demo":
     st.divider()
-    st.header("⚙️ Security Scan Configuration")
+    st.header("Security Scan Configuration")
 
     with st.container(border=True):
-        st.subheader("🪣 S3 Security Settings")
+        st.subheader("S3 Security Settings")
         col1, col2 = st.columns(2)
 
         with col1:
@@ -387,7 +521,7 @@ if operating_mode == "Demo":
             encryption_enabled = st.checkbox("Enable default bucket encryption", value=True)
 
         st.divider()
-        st.subheader("🔑 IAM Permission Settings")
+        st.subheader("IAM Permission Settings")
         col1, col2 = st.columns(2)
 
         with col1:
@@ -401,7 +535,7 @@ if operating_mode == "Demo":
         )
 
         st.divider()
-        st.subheader("📜 CloudTrail Logging Settings")
+        st.subheader("CloudTrail Logging Settings")
         col1, col2, col3 = st.columns(3)
 
         with col1:
@@ -414,14 +548,14 @@ if operating_mode == "Demo":
             multi_region_enabled = st.checkbox("Multi-region trail enabled", value=True)
 
         scan_clicked = st.button(
-            "🔍 Scan Configuration",
+            "Scan Configuration",
             type="primary",
             key="demo_scan_submit",
             **stretch_kwargs(st.button),
         )
 else:
     st.divider()
-    st.header("🔐 AWS Read-only Scan")
+    st.header("AWS Read-only Scan")
     with st.container(border=True):
         selected_region = st.text_input(
             "AWS region",
@@ -432,7 +566,7 @@ else:
             ),
         ).strip()
 
-        with st.expander("🔑 AWS Credentials (Optional)", expanded=False):
+        with st.expander("AWS Credentials (Optional)", expanded=False):
             st.caption(
                 "Leave blank to use the attached EC2 IAM Role (recommended on AWS), "
                 "local AWS credentials file (~/.aws/credentials), or environment variables."
@@ -606,7 +740,7 @@ risk_classification = classify_risk(risk_score)
 # ============================================================
 
 st.divider()
-st.header("🕒 Scan History")
+st.header("Scan History")
 
 history_df = pd.DataFrame(st.session_state["scan_history"])
 
@@ -621,7 +755,7 @@ else:
 # ============================================================
 
 st.divider()
-st.header("📊 Security Overview")
+st.header("Security Overview")
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -631,7 +765,7 @@ col3.metric("High Severity", high_count)
 col4.metric("Medium Severity", medium_count)
 
 st.divider()
-st.header("📈 Security Posture Summary")
+st.header("Security Posture Summary")
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -668,7 +802,7 @@ st.caption(
 # ============================================================
 
 st.divider()
-st.header("📉 Security Risk Trend")
+st.header("Security Risk Trend")
 
 mode_history = [
     record for record in st.session_state["scan_history"]
@@ -706,7 +840,7 @@ else:
 # ============================================================
 
 st.divider()
-st.header("🔄 Before vs After Security Scan")
+st.header("Before vs After Security Scan")
 
 previous_results = st.session_state["previous_scan_results"]
 
@@ -726,14 +860,14 @@ if previous_results is not None:
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("📌 Before")
+        st.subheader("Before")
         st.metric("Total Findings", len(previous_findings))
         st.metric("High Severity", previous_high)
         st.metric("Medium Severity", previous_medium)
         st.metric("Risk Score", f"{previous_score}/100")
 
     with col2:
-        st.subheader("✅ Latest Scan")
+        st.subheader("Latest Scan")
         st.metric(
             "Total Findings",
             len(current_findings),
@@ -788,7 +922,7 @@ else:
 # ============================================================
 
 st.divider()
-st.header("🔎 Filter Security Findings")
+st.header("Filter Security Findings")
 
 if not findings_df.empty:
     col1, col2 = st.columns(2)
@@ -837,7 +971,7 @@ else:
 # ============================================================
 
 st.divider()
-st.header("🪣 S3 Security Findings")
+st.header("S3 Security Findings")
 st.write("Checks public access protection and default encryption.")
 
 display_dataframe(
@@ -846,7 +980,7 @@ display_dataframe(
 )
 
 st.divider()
-st.header("🔑 IAM Permission Findings")
+st.header("IAM Permission Findings")
 st.write("Checks sample IAM policies for potentially broad permissions.")
 
 display_dataframe(
@@ -855,7 +989,7 @@ display_dataframe(
 )
 
 st.divider()
-st.header("📜 CloudTrail Logging Findings")
+st.header("CloudTrail Logging Findings")
 st.write("Checks selected-region logging status and trail configuration.")
 
 display_dataframe(
@@ -904,7 +1038,7 @@ if operating_mode == "AWS (read-only)" and isinstance(account_coverage, dict):
 # ============================================================
 
 st.divider()
-st.header("🛠️ Recommended Actions")
+st.header("Recommended Actions")
 
 if not all_findings:
     st.success("No findings were returned by the configured checks.")
@@ -991,7 +1125,7 @@ else:
 
                 steps = REMEDIATION_STEPS.get(service)
                 if steps:
-                    with st.expander("🔧 View Step-by-Step Remediation"):
+                    with st.expander("View Step-by-Step Remediation"):
                         st.markdown(
                             "\n".join(f"{n}. {step}" for n, step in enumerate(steps, start=1))
                         )
@@ -1002,19 +1136,24 @@ else:
 # ============================================================
 
 st.divider()
-st.header("📥 Export Security Report")
+st.header("Export Security Report")
 
 # The export always uses the full findings list, never just the current page.
 report_df = findings_df.copy()
 
 if not report_df.empty:
-    csv_data = report_df.to_csv(index=False).encode("utf-8")
+    pdf_data = generate_pdf_report(
+        "CloudSentry Security Audit Report",
+        report_df,
+        subtitle=f"Mode: {operating_mode} | Total Findings: {len(report_df)}",
+        landscape_mode=True,
+    )
 
     st.download_button(
-        label="⬇️ Download Audit Report (CSV)",
-        data=csv_data,
-        file_name="cloudsentry_security_report.csv",
-        mime="text/csv",
+        label="Download Audit Report (PDF)",
+        data=pdf_data,
+        file_name="cloudsentry_security_report.pdf",
+        mime="application/pdf",
         key="download_audit_report",
         **stretch_kwargs(st.download_button),
     )
@@ -1036,13 +1175,18 @@ if not report_df.empty:
         ]
     )
 
-    summary_csv = summary_report.to_csv(index=False).encode("utf-8")
+    summary_pdf = generate_pdf_report(
+        "CloudSentry Security Summary",
+        summary_report,
+        subtitle=f"Mode: {operating_mode} | Scan #{st.session_state['scan_number']}",
+        landscape_mode=False,
+    )
 
     st.download_button(
-        label="📊 Download Security Summary (CSV)",
-        data=summary_csv,
-        file_name="cloudsentry_security_summary.csv",
-        mime="text/csv",
+        label="Download Security Summary (PDF)",
+        data=summary_pdf,
+        file_name="cloudsentry_security_summary.pdf",
+        mime="application/pdf",
         key="download_security_summary",
         **stretch_kwargs(st.download_button),
     )

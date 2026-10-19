@@ -19,6 +19,11 @@ class AppIntegrationTests(unittest.TestCase):
         self.assertTrue(len(buttons) > 0, f"Button with text '{text}' not found")
         return buttons[0]
 
+    def _get_download_button_labels(self, at):
+        if hasattr(at, "download_button"):
+            return [db.label for db in at.download_button]
+        return [db.proto.label for db in at.get("download_button")]
+
     def test_demo_mode_initial_load(self):
         with patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "0"}):
             at = AppTest.from_file(self.app_path, default_timeout=15)
@@ -60,9 +65,9 @@ class AppIntegrationTests(unittest.TestCase):
         self.assertGreater(len(at.dataframe), 0)
 
         # Download buttons should be present
-        download_labels = [db.label for db in at.download_button]
-        self.assertIn("⬇️ Download Audit Report (CSV)", download_labels)
-        self.assertIn("📊 Download Security Summary (CSV)", download_labels)
+        download_labels = self._get_download_button_labels(at)
+        self.assertIn("Download Audit Report (PDF)", download_labels)
+        self.assertIn("Download Security Summary (PDF)", download_labels)
 
     def test_aws_scan_with_mocked_clients_and_pagination(self):
         aws_enabled = patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "true"})
@@ -155,9 +160,9 @@ class AppIntegrationTests(unittest.TestCase):
             self.assertFalse(at.exception)
 
             # Check that download buttons exist and are rendered cleanly
-            download_labels = [db.label for db in at.download_button]
-            self.assertIn("⬇️ Download Audit Report (CSV)", download_labels)
-            self.assertIn("📊 Download Security Summary (CSV)", download_labels)
+            download_labels = self._get_download_button_labels(at)
+            self.assertIn("Download Audit Report (PDF)", download_labels)
+            self.assertIn("Download Security Summary (PDF)", download_labels)
 
     def test_aws_scan_error_handling(self):
         aws_enabled = patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "true"})
