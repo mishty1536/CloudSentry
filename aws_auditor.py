@@ -40,6 +40,8 @@ def _error_reason(error):
         code = type(error).__name__
 
     lowered = str(code).lower()
+    if any(token in lowered for token in ("unrecognizedclient", "invalidclienttoken", "expiredtoken", "signaturedoesnotmatch", "invalidsignature")):
+        return "AWS authentication failed for this read-only check. Coverage is unverified; verify the instance role or credential provider configuration."
     if "accessdenied" in lowered or "unauthorized" in lowered or code in {"403", "AccessDeniedException"}:
         return "AWS denied this read-only check. Grant only its documented read permission or retain this unverified result."
     if "throttl" in lowered or "slowdown" in lowered or "requestlimit" in lowered:
@@ -758,13 +760,281 @@ def audit_cloudtrail_region(cloudtrail_client, region):
     return findings
 
 
-def audit_aws_account(s3_client, iam_client, cloudtrail_client, region):
+def audit_cloudtrail_account_coverage(regions_client_factory, cloudtrail_client_factory):
+    """Assess trail configuration across enabled regions without conflating unknowns with gaps.
+
+    This assesses configured trail coverage from DescribeTrails metadata only. It
+    does not establish delivery health in every region; GetTrailStatus remains
+    part of the separate selected-region check.
+    """
+    assessment = {
+        "service": "CloudTrail",
+        "assessment": "account-wide configured trail coverage",
+        "coverage_status": "unknown",
+        "inventory_complete": False,
+        "enabled_regions": [],
+        "checked_regions": [],
+        "covered_regions": [],
+        "uncovered_regions": [],
+        "unverified_regions": [],
+        "not_enabled_regions": [],
+        "trails": [],
+        "limitations": "Configuration coverage only; logging delivery status is checked separately in the selected region.",
+    }
+
+    def mark_unverified(region, operation, error=None, reason=None):
+        entry = {"region": region or "unknown", "operation": operation}
+        if error is not None:
+            entry["error_code"] = _error_code(error)
+            entry["reason"] = _error_reason(error)
+        else:
+            entry["reason"] = reason or "AWS returned incomplete or malformed data; coverage is unverified."
+        assessment["unverified_regions"].append(entry)
+
+    try:
+        regions_client = regions_client_factory()
+        response = regions_client.describe_regions(AllRegions=True)
+    except (ClientError, BotoCoreError) as error:
+        mark_unverified("all", "DescribeRegions", error)
+        return assessment
+    except Exception:
+        mark_unverified("all", "DescribeRegions")
+        return assessment
+
+    if not isinstance(response, dict) or not isinstance(response.get("Regions"), list):
+        mark_unverified("all", "DescribeRegions", reason="AWS returned a missing or malformed region inventory.")
+        return assessment
+
+    regions = response["Regions"]
+    enabled = set()
+    not_enabled = set()
+    malformed_inventory = False
+    for item in regions:
+        if not isinstance(item, dict):
+            malformed_inventory = True
+            mark_unverified("all", "DescribeRegions", reason="AWS returned a malformed region entry.")
+            continue
+        name = item.get("RegionName")
+        opt_in = item.get("OptInStatus")
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", name):
+            malformed_inventory = True
+            mark_unverified("all", "DescribeRegions", reason="AWS returned a region without a valid name.")
+            continue
+        if opt_in in {"opt-in-not-required", "opted-in"}:
+            enabled.add(name)
+        elif opt_in == "not-opted-in":
+            not_enabled.add(name)
+        else:
+            malformed_inventory = True
+            mark_unverified(name, "DescribeRegions", reason="AWS did not return a recognized region opt-in status.")
+
+    assessment["enabled_regions"] = sorted(enabled)
+    assessment["not_enabled_regions"] = sorted(not_enabled)
+    if malformed_inventory:
+        assessment["inventory_complete"] = False
+    else:
+        assessment["inventory_complete"] = True
+    if not enabled:
+        assessment["inventory_complete"] = False
+        mark_unverified("all", "DescribeRegions", reason="AWS returned no enabled regions; account-wide coverage cannot be assessed.")
+
+    trails_by_arn = {}
+    checked = set()
+    incomplete_regions = set()
+    regional_home_claims = {}
+    for region in sorted(enabled):
+        try:
+            client = cloudtrail_client_factory(region)
+            trail_response = client.describe_trails(includeShadowTrails=True)
+        except (ClientError, BotoCoreError) as error:
+            mark_unverified(region, "DescribeTrails", error)
+            continue
+        except Exception:
+            mark_unverified(region, "DescribeTrails")
+            continue
+
+        if not isinstance(trail_response, dict) or not isinstance(trail_response.get("trailList"), list):
+            mark_unverified(region, "DescribeTrails", reason="AWS returned a missing or malformed trail list.")
+            continue
+
+        checked.add(region)
+        region_incomplete = False
+        for trail in trail_response["trailList"]:
+            if not isinstance(trail, dict):
+                region_incomplete = True
+                mark_unverified(region, "DescribeTrails", reason="AWS returned a malformed trail entry.")
+                continue
+
+            multi = trail.get("IsMultiRegionTrail")
+            home = trail.get("HomeRegion")
+            arn = trail.get("TrailARN")
+            name = trail.get("Name")
+            org = trail.get("IsOrganizationTrail")
+            if (
+                not isinstance(multi, bool)
+                or not isinstance(home, str)
+                or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", home)
+            ):
+                region_incomplete = True
+                mark_unverified(region, "DescribeTrails", reason="Trail scope or home region is missing or malformed.")
+                continue
+            if org is not None and not isinstance(org, bool):
+                region_incomplete = True
+                mark_unverified(region, "DescribeTrails", reason="Organization-trail status is malformed.")
+                continue
+            if arn is not None and (
+                not isinstance(arn, str)
+                or not re.fullmatch(
+                    r"arn:[a-z0-9-]+:cloudtrail:[a-z0-9-]+:\d{12}:trail/[^\s]+",
+                    arn,
+                )
+            ):
+                region_incomplete = True
+                mark_unverified(region, "DescribeTrails", reason="Trail ARN is malformed.")
+                continue
+            if name is not None and (not isinstance(name, str) or not name.strip()):
+                region_incomplete = True
+                mark_unverified(region, "DescribeTrails", reason="Trail name is malformed.")
+                continue
+            if arn is None and name is None:
+                region_incomplete = True
+                mark_unverified(region, "DescribeTrails", reason="Trail identity is missing.")
+                continue
+
+            trail_key = arn or f"{home}:{name or 'unnamed'}"
+            entry = trails_by_arn.get(trail_key)
+            if entry is None:
+                entry = {
+                    "trail_arn": arn,
+                    "name": name,
+                    "home_region": home,
+                    "is_multi_region": multi,
+                    "is_organization_trail": org,
+                    "observed_regions": [],
+                    "reported_home_regions": {home},
+                    "metadata_conflict": False,
+                }
+                trails_by_arn[trail_key] = entry
+            elif (
+                entry["home_region"] != home
+                or entry["is_multi_region"] is not multi
+                or (
+                    entry["is_organization_trail"] is not None
+                    and org is not None
+                    and entry["is_organization_trail"] is not org
+                )
+            ):
+                entry["metadata_conflict"] = True
+                entry["reported_home_regions"].add(home)
+            elif entry["is_organization_trail"] is None and org is not None:
+                # The field is optional in some responses; a single explicit
+                # value can resolve an omitted value without contradicting it.
+                entry["is_organization_trail"] = org
+            if region not in entry["observed_regions"]:
+                entry["observed_regions"].append(region)
+            if entry["metadata_conflict"]:
+                region_incomplete = True
+                mark_unverified(
+                    region,
+                    "DescribeTrails",
+                    reason="The same trail ARN was returned with conflicting metadata; its coverage is unverified.",
+                )
+            elif not multi and home != region:
+                region_incomplete = True
+                if home in enabled:
+                    regional_home_claims.setdefault(home, set()).add(trail_key)
+                mark_unverified(
+                    region,
+                    "DescribeTrails",
+                    reason="A regional trail was returned outside its declared home region.",
+                )
+
+        if region_incomplete:
+            incomplete_regions.add(region)
+
+    # Derive coverage only after all regional responses have been compared.
+    # Conflicting duplicates cannot expand coverage based on whichever copy
+    # happened to be processed last.
+    covered = set()
+    regional_home_confirmed = set()
+    for entry in trails_by_arn.values():
+        if entry["metadata_conflict"]:
+            affected_regions = set(entry["observed_regions"])
+            affected_regions.update(entry["reported_home_regions"])
+            for affected_region in affected_regions:
+                incomplete_regions.add(affected_region)
+                mark_unverified(
+                    affected_region,
+                    "DescribeTrails",
+                    reason="The same trail ARN was returned with conflicting metadata; its coverage is unverified.",
+                )
+            continue
+        if entry["is_multi_region"]:
+            covered.update(enabled)
+        elif entry["home_region"] in entry["observed_regions"]:
+            covered.add(entry["home_region"])
+            regional_home_confirmed.add(entry["home_region"])
+
+    for home_region in regional_home_claims:
+        if home_region in regional_home_confirmed:
+            continue
+        incomplete_regions.add(home_region)
+        mark_unverified(
+            home_region,
+            "DescribeTrails",
+            reason="A regional trail reported this home region, but its own regional response did not confirm the trail.",
+        )
+
+    # A region with a valid empty response is a confirmed gap only when no
+    # malformed or contradictory trail data affects that region.
+    uncovered = {
+        region for region in checked
+        if region not in covered and region not in incomplete_regions
+    }
+
+    # A malformed/denied response is not a confirmed gap, even if no trail was
+    # visible elsewhere. Remove covered regions from the uncovered set.
+    uncovered.difference_update(covered)
+    assessment["checked_regions"] = sorted(checked)
+    assessment["covered_regions"] = sorted(covered & enabled)
+    assessment["uncovered_regions"] = sorted(uncovered & checked)
+    assessment["trails"] = sorted(
+        trails_by_arn.values(), key=lambda item: (item["home_region"], item["name"] or "")
+    )
+    known_unverified = {entry["region"] for entry in assessment["unverified_regions"]}
+    assessment["unverified_regions"] = sorted(
+        assessment["unverified_regions"], key=lambda item: (item["region"], item["operation"])
+    )
+    assessment["coverage_status"] = (
+        "partial" if assessment["unverified_regions"] or not assessment["inventory_complete"]
+        else "complete"
+    )
+    assessment["coverage_is_complete"] = (
+        assessment["coverage_status"] == "complete"
+        and not assessment["uncovered_regions"]
+        and not assessment["not_enabled_regions"]
+    )
+    assessment["unverified_region_names"] = sorted(
+        name for name in known_unverified if name != "all"
+    )
+    return assessment
+
+
+def audit_aws_account(
+    s3_client, iam_client, cloudtrail_client, region,
+    regions_client_factory=None, cloudtrail_client_factory=None,
+):
     """Run AWS checks using already-created, injectable Boto3 clients."""
-    return {
+    results = {
         "s3": audit_s3_account(s3_client),
         "iam": audit_iam_account(iam_client),
         "cloudtrail": audit_cloudtrail_region(cloudtrail_client, region),
     }
+    if regions_client_factory is not None and cloudtrail_client_factory is not None:
+        results["cloudtrail_account_coverage"] = audit_cloudtrail_account_coverage(
+            regions_client_factory, cloudtrail_client_factory
+        )
+    return results
 
 
 def create_aws_clients(
@@ -779,6 +1049,24 @@ def create_aws_clients(
     This function performs no API operation. Call it only after explicit user
     action; it does not persist or display credentials.
     """
+    session, clients = create_aws_clients_with_session(
+        region,
+        session_factory=session_factory,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        aws_session_token=aws_session_token,
+    )
+    return clients
+
+
+def create_aws_clients_with_session(
+    region,
+    session_factory=None,
+    aws_access_key_id=None,
+    aws_secret_access_key=None,
+    aws_session_token=None,
+):
+    """Create scan clients and return their shared session for regional checks."""
     if session_factory is None:
         import boto3
         session_factory = boto3.Session
@@ -791,8 +1079,9 @@ def create_aws_clients(
             session_kwargs["aws_session_token"] = str(aws_session_token).strip()
 
     session = session_factory(**session_kwargs)
-    return (
+    clients = (
         session.client("s3"),
         session.client("iam"),
         session.client("cloudtrail", region_name=region),
     )
+    return session, clients

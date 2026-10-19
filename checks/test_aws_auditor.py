@@ -10,10 +10,12 @@ from botocore.stub import Stubber
 
 from aws_auditor import (
     audit_aws_account,
+    audit_cloudtrail_account_coverage,
     audit_cloudtrail_region,
     audit_iam_account,
     audit_s3_account,
     create_aws_clients,
+    create_aws_clients_with_session,
 )
 
 
@@ -699,6 +701,198 @@ class AuditCloudTrailRegionTests(unittest.TestCase):
         self.assertNotIn("No CloudTrail trail was returned", findings[0]["finding"])
 
 
+class AuditCloudTrailAccountCoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.regions_client = Mock()
+        self.regions_client.describe_regions.return_value = {"Regions": [
+            {"RegionName": "ap-southeast-2", "OptInStatus": "opt-in-not-required"},
+            {"RegionName": "us-east-1", "OptInStatus": "opted-in"},
+        ]}
+
+    def _assess(self, responses):
+        clients = {}
+
+        def trail_client(region):
+            client = clients.setdefault(region, Mock())
+            response = responses.get(region)
+            if isinstance(response, Exception):
+                client.describe_trails.side_effect = response
+            else:
+                client.describe_trails.return_value = response
+            return client
+
+        result = audit_cloudtrail_account_coverage(
+            lambda: self.regions_client,
+            trail_client,
+        )
+        return result, clients
+
+    def test_multi_region_organization_trail_and_shadow_duplicates_are_deduplicated(self):
+        trail = {
+            "Name": "org-audit",
+            "TrailARN": "arn:aws:cloudtrail:us-east-1:123456789012:trail/org-audit",
+            "HomeRegion": "us-east-1",
+            "IsMultiRegionTrail": True,
+            "IsOrganizationTrail": True,
+        }
+        self.regions_client.describe_regions.return_value["Regions"].append(
+            {"RegionName": "us-west-1", "OptInStatus": "not-opted-in"}
+        )
+        result, clients = self._assess({
+            "ap-southeast-2": {"trailList": [dict(trail)]},
+            "us-east-1": {"trailList": [dict(trail)]},
+        })
+
+        self.assertEqual(result["coverage_status"], "complete")
+        self.assertEqual(result["covered_regions"], ["ap-southeast-2", "us-east-1"])
+        self.assertEqual(result["uncovered_regions"], [])
+        self.assertEqual(result["not_enabled_regions"], ["us-west-1"])
+        self.assertEqual(len(result["trails"]), 1)
+        self.assertTrue(result["trails"][0]["is_organization_trail"])
+        self.assertEqual(result["trails"][0]["observed_regions"], ["ap-southeast-2", "us-east-1"])
+        self.assertEqual(set(clients), {"ap-southeast-2", "us-east-1"})
+        self.regions_client.describe_regions.assert_called_once_with(AllRegions=True)
+
+    def test_partial_access_keeps_denied_region_unverified_and_reports_confirmed_gap(self):
+        self.regions_client.describe_regions.return_value["Regions"].append(
+            {"RegionName": "eu-west-1", "OptInStatus": "opted-in"}
+        )
+        result, _ = self._assess({
+            "ap-southeast-2": {"trailList": [{
+                "Name": "regional", "HomeRegion": "ap-southeast-2",
+                "IsMultiRegionTrail": False,
+            }]},
+            "us-east-1": client_error("AccessDeniedException", "DescribeTrails"),
+            "eu-west-1": {"trailList": []},
+        })
+        self.assertEqual(result["coverage_status"], "partial")
+        self.assertEqual(result["covered_regions"], ["ap-southeast-2"])
+        self.assertEqual(result["uncovered_regions"], ["eu-west-1"])
+        denied = next(item for item in result["unverified_regions"] if item["region"] == "us-east-1")
+        self.assertEqual(denied["error_code"], "AccessDeniedException")
+
+    def test_empty_response_confirms_only_that_region_has_no_returned_trail(self):
+        self.regions_client.describe_regions.return_value["Regions"].append(
+            {"RegionName": "eu-west-1", "OptInStatus": "opted-in"}
+        )
+        result, _ = self._assess({
+            "ap-southeast-2": {"trailList": []},
+            "us-east-1": client_error("UnrecognizedClientException", "DescribeTrails"),
+            "eu-west-1": {"trailList": []},
+        })
+        self.assertEqual(result["coverage_status"], "partial")
+        self.assertEqual(result["uncovered_regions"], ["ap-southeast-2", "eu-west-1"])
+        self.assertIn("us-east-1", result["unverified_region_names"])
+        self.assertFalse(result["coverage_is_complete"])
+
+    def test_authentication_failure_while_listing_regions_is_unknown_not_absent(self):
+        self.regions_client.describe_regions.side_effect = client_error(
+            "UnrecognizedClientException", "DescribeRegions"
+        )
+        result = audit_cloudtrail_account_coverage(lambda: self.regions_client, Mock())
+        self.assertEqual(result["coverage_status"], "unknown")
+        self.assertFalse(result["inventory_complete"])
+        self.assertEqual(result["enabled_regions"], [])
+        self.assertEqual(result["uncovered_regions"], [])
+        self.assertEqual(result["unverified_regions"][0]["error_code"], "UnrecognizedClientException")
+        self.assertIn("authentication failed", result["unverified_regions"][0]["reason"])
+
+    def test_malformed_region_and_trail_responses_remain_unverified(self):
+        self.regions_client.describe_regions.return_value = {
+            "Regions": [
+                {"RegionName": "ap-southeast-2", "OptInStatus": "opted-in"},
+                {"RegionName": "us-east-1"},
+            ]
+        }
+        result, _ = self._assess({"ap-southeast-2": {"trailList": [{
+            "Name": "missing-scope", "HomeRegion": "ap-southeast-2",
+        }]}})
+        self.assertEqual(result["coverage_status"], "partial")
+        self.assertEqual(result["uncovered_regions"], [])
+        self.assertTrue(result["unverified_regions"])
+
+        self.regions_client.describe_regions.return_value = {"Regions": [
+            {"RegionName": "ap-southeast-2", "OptInStatus": "opted-in"},
+        ]}
+        result, _ = self._assess({"ap-southeast-2": {"trailList": "not-a-list"}})
+        self.assertEqual(result["coverage_status"], "partial")
+        self.assertEqual(result["uncovered_regions"], [])
+        self.assertEqual(result["unverified_regions"][0]["region"], "ap-southeast-2")
+
+    def test_unsupported_region_operation_does_not_claim_absence(self):
+        result, _ = self._assess({
+            "ap-southeast-2": {"trailList": []},
+            "us-east-1": client_error("InvalidRegionException", "DescribeTrails"),
+        })
+        self.assertEqual(result["coverage_status"], "partial")
+        self.assertNotIn("us-east-1", result["uncovered_regions"])
+        self.assertIn("us-east-1", result["unverified_region_names"])
+
+    def test_regional_trail_covers_only_its_home_region(self):
+        result, _ = self._assess({
+            "ap-southeast-2": {"trailList": [{
+                "Name": "regional", "HomeRegion": "ap-southeast-2",
+                "IsMultiRegionTrail": False, "IsOrganizationTrail": False,
+            }]},
+            "us-east-1": {"trailList": []},
+        })
+        self.assertEqual(result["coverage_status"], "complete")
+        self.assertEqual(result["covered_regions"], ["ap-southeast-2"])
+        self.assertEqual(result["uncovered_regions"], ["us-east-1"])
+        self.assertFalse(result["coverage_is_complete"])
+
+    def test_conflicting_duplicate_scope_is_unverified_without_expanded_coverage(self):
+        arn = "arn:aws:cloudtrail:us-east-1:123456789012:trail/shared"
+        regional = {
+            "Name": "shared", "TrailARN": arn, "HomeRegion": "us-east-1",
+            "IsMultiRegionTrail": False,
+        }
+        conflicting_shadow = {
+            **regional,
+            "HomeRegion": "ap-southeast-2",
+            "IsMultiRegionTrail": True,
+        }
+        result, _ = self._assess({
+            "ap-southeast-2": {"trailList": [conflicting_shadow]},
+            "us-east-1": {"trailList": [regional]},
+        })
+
+        self.assertEqual(result["coverage_status"], "partial")
+        self.assertEqual(result["covered_regions"], [])
+        self.assertEqual(result["uncovered_regions"], [])
+        self.assertEqual(result["unverified_region_names"], ["ap-southeast-2", "us-east-1"])
+
+    def test_regional_trail_outside_home_does_not_confirm_home_without_home_response(self):
+        trail = {
+            "Name": "regional", "TrailARN": "arn:aws:cloudtrail:ap-southeast-2:123456789012:trail/regional",
+            "HomeRegion": "ap-southeast-2", "IsMultiRegionTrail": False,
+        }
+        result, _ = self._assess({
+            "ap-southeast-2": {"trailList": []},
+            "us-east-1": {"trailList": [trail]},
+        })
+
+        self.assertEqual(result["coverage_status"], "partial")
+        self.assertEqual(result["covered_regions"], [])
+        self.assertEqual(result["uncovered_regions"], [])
+        self.assertEqual(result["unverified_region_names"], ["ap-southeast-2", "us-east-1"])
+
+    def test_home_region_response_confirms_regional_trail_after_inconsistent_shadow_result(self):
+        trail = {
+            "Name": "regional", "TrailARN": "arn:aws:cloudtrail:ap-southeast-2:123456789012:trail/regional",
+            "HomeRegion": "ap-southeast-2", "IsMultiRegionTrail": False,
+        }
+        result, _ = self._assess({
+            "ap-southeast-2": {"trailList": [trail]},
+            "us-east-1": {"trailList": [trail]},
+        })
+
+        self.assertEqual(result["coverage_status"], "partial")
+        self.assertEqual(result["covered_regions"], ["ap-southeast-2"])
+        self.assertNotIn("ap-southeast-2", result["unverified_region_names"])
+        self.assertIn("us-east-1", result["unverified_region_names"])
+
+
 class AuditAwsAccountTests(unittest.TestCase):
     def test_successful_scan_uses_current_botocore_request_and_response_models(self):
         # Explicit dummy credentials prevent credential-provider lookup. Every
@@ -810,6 +1004,22 @@ class AuditAwsAccountTests(unittest.TestCase):
             aws_access_key_id="TESTKEYID",
             aws_secret_access_key="TESTSECRETKEY",
             aws_session_token="TESTTOKEN",
+        )
+
+    def test_session_returning_factory_reuses_one_session_for_all_clients(self):
+        session = Mock()
+        session_factory = Mock(return_value=session)
+
+        returned_session, clients = create_aws_clients_with_session(
+            "ap-southeast-2", session_factory=session_factory
+        )
+
+        self.assertIs(returned_session, session)
+        self.assertEqual(len(clients), 3)
+        session_factory.assert_called_once_with(region_name="ap-southeast-2")
+        self.assertEqual(
+            [call.args[0] for call in session.client.call_args_list],
+            ["s3", "iam", "cloudtrail"],
         )
 
 

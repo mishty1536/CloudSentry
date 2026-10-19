@@ -14,7 +14,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from s3_auditor import audit_s3_configuration
 from iam_auditor import audit_iam_policy
 from cloudTrail_auditor import audit_cloudtrail_configuration
-from aws_auditor import audit_aws_account, create_aws_clients
+from aws_auditor import audit_aws_account, create_aws_clients_with_session
 from dashboard_helpers import (
     assessment_status,
     calculate_risk_score,
@@ -38,6 +38,16 @@ def log_aws_scan_exception(error, *, phase, region):
         type(error).__name__,
         stack,
     )
+
+
+def combine_scan_findings(results):
+    """Combine findings while keeping account-wide coverage metadata separate."""
+    if isinstance(results, dict) and "cloudtrail_account_coverage" in results:
+        results = {
+            key: value for key, value in results.items()
+            if key != "cloudtrail_account_coverage"
+        }
+    return combine_findings(results)
 
 
 # ============================================================
@@ -483,7 +493,7 @@ if scan_clicked:
         scan_phase = "AWS client initialization"
         try:
             with st.spinner(f"Running read-only AWS security scan in {selected_region}..."):
-                s3_client, iam_client, cloudtrail_client = create_aws_clients(
+                session, (s3_client, iam_client, cloudtrail_client) = create_aws_clients_with_session(
                     selected_region,
                     aws_access_key_id=aws_access_key or None,
                     aws_secret_access_key=aws_secret_key or None,
@@ -491,7 +501,16 @@ if scan_clicked:
                 )
                 scan_phase = "S3, IAM, and CloudTrail audit operations"
                 new_results = audit_aws_account(
-                    s3_client, iam_client, cloudtrail_client, selected_region
+                    s3_client,
+                    iam_client,
+                    cloudtrail_client,
+                    selected_region,
+                    regions_client_factory=lambda: session.client(
+                        "ec2", region_name=selected_region
+                    ),
+                    cloudtrail_client_factory=lambda region: session.client(
+                        "cloudtrail", region_name=region
+                    ),
                 )
         except (BotoCoreError, ClientError, ValueError) as error:
             st.error(
@@ -523,7 +542,7 @@ if scan_clicked:
         st.session_state["scan_region"] = selected_region
         st.session_state["scan_number"] += 1
 
-        all_new_findings = combine_findings(new_results)
+        all_new_findings = combine_scan_findings(new_results)
         new_risk_score = calculate_risk_score(all_new_findings)
         history_record = {
             "Scan Number": st.session_state["scan_number"],
@@ -569,7 +588,7 @@ if operating_mode == "AWS (read-only)":
     )
 
 # Findings are computed once and reused by every section below.
-all_findings = combine_findings(results)
+all_findings = combine_scan_findings(results)
 findings_df = clean_findings_dataframe(pd.DataFrame(all_findings))
 
 high_count = count_severity(all_findings, "High")
@@ -692,7 +711,7 @@ st.header("🔄 Before vs After Security Scan")
 previous_results = st.session_state["previous_scan_results"]
 
 if previous_results is not None:
-    previous_findings = combine_findings(previous_results)
+    previous_findings = combine_scan_findings(previous_results)
     current_findings = all_findings
 
     previous_high = count_severity(previous_findings, "High")
@@ -837,12 +856,47 @@ display_dataframe(
 
 st.divider()
 st.header("📜 CloudTrail Logging Findings")
-st.write("Checks sample activity logging and trail configuration.")
+st.write("Checks selected-region logging status and trail configuration.")
 
 display_dataframe(
     make_findings_dataframe(combine_findings({"cloudtrail": results.get("cloudtrail", [])})),
     hide_index=True,
 )
+
+account_coverage = results.get("cloudtrail_account_coverage")
+if operating_mode == "AWS (read-only)" and isinstance(account_coverage, dict):
+    st.subheader("Account-wide CloudTrail configured coverage")
+    coverage_status = account_coverage.get("coverage_status", "unknown")
+    if coverage_status == "complete":
+        st.info("Regional inventory and CloudTrail configuration checks completed for all enabled regions.")
+    else:
+        st.warning("Account-wide coverage is partial or unverified. Unknown regions are not treated as uncovered.")
+    st.caption(
+        "This assessment checks configured trail scope. It does not verify logging delivery status in every region; "
+        "GetTrailStatus is checked only in the selected region. Multi-region and organization trail metadata "
+        "is deduplicated by trail ARN. Regions that are not opted in are listed separately."
+    )
+    coverage_rows = []
+    for region in account_coverage.get("enabled_regions", []):
+        if region in account_coverage.get("unverified_region_names", []):
+            state = "Unverified"
+        elif region in account_coverage.get("covered_regions", []):
+            state = "Configured coverage confirmed"
+        elif region in account_coverage.get("uncovered_regions", []):
+            state = "No trail returned"
+        else:
+            state = "Unverified"
+        coverage_rows.append({"Region": region, "Assessment": state})
+    for region in account_coverage.get("not_enabled_regions", []):
+        coverage_rows.append({"Region": region, "Assessment": "Not opted in; not assessed"})
+    if coverage_rows:
+        st.dataframe(pd.DataFrame(coverage_rows), hide_index=True, use_container_width=True)
+    if account_coverage.get("unverified_regions"):
+        st.write("Unverified operations")
+        st.dataframe(pd.DataFrame(account_coverage["unverified_regions"]), hide_index=True, use_container_width=True)
+    if account_coverage.get("trails"):
+        st.write("Distinct trails returned")
+        st.dataframe(pd.DataFrame(account_coverage["trails"]), hide_index=True, use_container_width=True)
 
 
 # ============================================================

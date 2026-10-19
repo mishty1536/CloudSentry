@@ -125,10 +125,16 @@ class AppIntegrationTests(unittest.TestCase):
                 },
             ],
         }
+        mock_findings["cloudtrail_account_coverage"] = {
+            "coverage_status": "partial",
+            "unverified_regions": [{"region": "us-east-1"}],
+            "covered_regions": [],
+            "uncovered_regions": [],
+        }
 
-        with patch("aws_auditor.create_aws_clients") as mock_create, \
+        with patch("aws_auditor.create_aws_clients_with_session") as mock_create, \
              patch("aws_auditor.audit_aws_account", return_value=mock_findings):
-            mock_create.return_value = (Mock(), Mock(), Mock())
+            mock_create.return_value = (Mock(), (Mock(), Mock(), Mock()))
 
             btn = self._get_button_by_label(at, "Start AWS scan")
             btn.click().run()
@@ -169,7 +175,7 @@ class AppIntegrationTests(unittest.TestCase):
         secret_sentinel = "TEST-SECRET-DO-NOT-LOG"
         with self.assertLogs("cloudsentry.aws_scan", level="ERROR") as captured:
             with patch(
-                "aws_auditor.create_aws_clients",
+                "aws_auditor.create_aws_clients_with_session",
                 side_effect=TypeError(secret_sentinel),
             ):
                 btn = self._get_button_by_label(at, "Start AWS scan")
@@ -194,7 +200,10 @@ class AppIntegrationTests(unittest.TestCase):
         secret_sentinel = "TEST-SESSION-TOKEN-DO-NOT-LOG"
         with self.assertLogs("cloudsentry.aws_scan", level="ERROR") as captured:
             with (
-                patch("aws_auditor.create_aws_clients", return_value=(Mock(), Mock(), Mock())),
+                patch(
+                    "aws_auditor.create_aws_clients_with_session",
+                    return_value=(Mock(), (Mock(), Mock(), Mock())),
+                ),
                 patch("aws_auditor.audit_aws_account", side_effect=TypeError(secret_sentinel)),
             ):
                 btn = self._get_button_by_label(at, "Start AWS scan")

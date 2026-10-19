@@ -265,6 +265,12 @@ Attach a least-privilege policy like the following to the identity used by Boto3
       "Resource": "*"
     },
     {
+      "Sid": "ListAvailableRegionsForCloudTrailCoverage",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeRegions",
+      "Resource": "*"
+    },
+    {
       "Sid": "ReadCloudTrailStatus",
       "Effect": "Allow",
       "Action": "cloudtrail:GetTrailStatus",
@@ -306,13 +312,17 @@ If a required read permission is missing, throttled, or unavailable, the affecte
 - Uses `DescribeTrails` in the selected region, including shadow trails.
 - Uses `GetTrailStatus` to check whether each returned trail is currently logging.
 - Checks trail multi-region configuration and log file validation.
-- CloudTrail status is regional; one scan does not verify logging status in every AWS region.
-- If no trail is returned in the selected region, broader coverage is reported as unverified.
-- Does not evaluate event selectors, destination bucket policies, KMS key policies, organization-wide coverage, or delivery-error fields.
+- Separately enumerates AWS regions with `ec2:DescribeRegions` and checks enabled regions with `cloudtrail:DescribeTrails`, including shadow trails.
+- Deduplicates trails by ARN and reports multi-region, home-region, and organization-trail metadata. Regional trails cover only their home region; a multi-region trail is treated as configured coverage for enabled regions.
+- Access denied, authentication errors, unsupported regions, throttling, and malformed responses are reported as unverified. Unverified regions are never treated as confirmed gaps.
+- The account-wide result assesses configured trail coverage only. `GetTrailStatus` still runs only in the selected region, so delivery/logging status is not verified account-wide.
+- Regions marked `not-opted-in` are shown separately and are not scanned. If any enabled region cannot be checked, the account-wide result is partial and does not claim complete coverage or account-wide absence.
+- The organization-trail flag is reported as returned metadata; the app does not independently verify organization membership or effective organization-wide coverage.
+- Does not evaluate event selectors, destination bucket policies, KMS key policies, or delivery-error fields.
 
 ### Region and Risk Score
 
-The selected AWS region is shown with AWS results. S3 bucket listing and IAM are account-level APIs, while CloudTrail checks apply to the selected region.
+The selected AWS region is shown with AWS results. S3 bucket listing and IAM are account-level APIs. CloudTrail selected-region findings remain separate from the account-wide configured-coverage assessment. The latter requires `ec2:DescribeRegions` in addition to the CloudTrail read permissions above.
 
 The dashboard's prototype risk score retains its existing formula. Unknown severities contribute zero points and remain in the denominator, so unverified results can lower the score. Review Unknown findings separately; a lower score does not necessarily mean that the environment is secure.
 
