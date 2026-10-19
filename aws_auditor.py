@@ -119,8 +119,10 @@ def audit_s3_account(s3_client):
             listing_complete = False
             break
 
-        if not isinstance(response, dict) or (
-            "Buckets" in response and not isinstance(response["Buckets"], list)
+        if (
+            not isinstance(response, dict)
+            or "Buckets" not in response
+            or not isinstance(response["Buckets"], list)
         ):
             findings.append(_unverified(
                 "S3", "ListBuckets", "AWS returned an unexpected bucket list. Bucket coverage is unverified."
@@ -483,20 +485,28 @@ def audit_cloudtrail_region(cloudtrail_client, region):
     except (ClientError, BotoCoreError) as error:
         return [_operation_error("CloudTrail", "DescribeTrails", error, region=region)]
 
-    if not isinstance(response, dict) or (
-        "trailList" in response and not isinstance(response["trailList"], list)
+    if (
+        not isinstance(response, dict)
+        or "trailList" not in response
+        or not isinstance(response["trailList"], list)
     ):
         return [_unverified(
             "CloudTrail", "DescribeTrails", "AWS returned an unexpected trail list. Trail coverage is unverified.", region=region
         )]
     trails = response.get("trailList", [])
     if not trails:
-        return [_unverified(
-            "CloudTrail",
-            "DescribeTrails",
-            "No trail was returned for this region. This regional result does not establish trail coverage in other regions.",
-            region=region,
-        )]
+        return [{
+            "service": "CloudTrail",
+            "severity": "Medium",
+            "finding": f"No CloudTrail trail was returned for {region}",
+            "recommendation": (
+                "Review whether a CloudTrail trail should be configured in this region "
+                "to retain and deliver audit logs. This result does not establish "
+                "CloudTrail coverage in other regions or organization-wide."
+            ),
+            "operation": "DescribeTrails",
+            "region": region,
+        }]
 
     for trail in trails:
         if not isinstance(trail, dict):

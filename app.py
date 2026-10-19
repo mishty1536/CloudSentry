@@ -96,8 +96,8 @@ st.write(
     "and review recommended security improvements."
 )
 
-aws_scan_enabled = os.environ.get("CLOUDSENTRY_ENABLE_AWS_SCAN", "1").strip().lower() not in {
-    "0", "false", "no", "disable", "disabled"
+aws_scan_enabled = os.environ.get("CLOUDSENTRY_ENABLE_AWS_SCAN", "").strip().lower() in {
+    "1", "true", "yes"
 }
 mode_options = ["Demo", "AWS (read-only)"] if aws_scan_enabled else ["Demo"]
 if st.session_state.get("operating_mode") not in mode_options:
@@ -342,7 +342,7 @@ if operating_mode == "Demo":
     st.divider()
     st.header("⚙️ Security Scan Configuration")
 
-    with st.form("security_scan_form"):
+    with st.container(border=True):
         st.subheader("🪣 S3 Security Settings")
         col1, col2 = st.columns(2)
 
@@ -382,15 +382,16 @@ if operating_mode == "Demo":
         with col3:
             multi_region_enabled = st.checkbox("Multi-region trail enabled", value=True)
 
-        scan_clicked = st.form_submit_button(
+        scan_clicked = st.button(
             "🔍 Scan Configuration",
             type="primary",
-            **stretch_kwargs(st.form_submit_button),
+            key="demo_scan_submit",
+            **stretch_kwargs(st.button),
         )
 else:
     st.divider()
     st.header("🔐 AWS Read-only Scan")
-    with st.form("aws_scan_form"):
+    with st.container(border=True):
         selected_region = st.text_input(
             "AWS region",
             value=st.session_state.get("aws_region", "us-east-1"),
@@ -424,10 +425,11 @@ else:
                 key="aws_session_token_input",
             ).strip()
 
-        scan_clicked = st.form_submit_button(
+        scan_clicked = st.button(
             "Start AWS scan",
             type="primary",
-            **stretch_kwargs(st.form_submit_button),
+            key="aws_scan_submit",
+            **stretch_kwargs(st.button),
         )
     if selected_region:
         st.session_state["aws_region"] = selected_region

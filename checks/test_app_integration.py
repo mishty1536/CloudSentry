@@ -20,13 +20,14 @@ class AppIntegrationTests(unittest.TestCase):
         return buttons[0]
 
     def test_demo_mode_initial_load(self):
-        at = AppTest.from_file(self.app_path, default_timeout=15)
-        at.run()
+        with patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "0"}):
+            at = AppTest.from_file(self.app_path, default_timeout=15)
+            at.run()
         self.assertFalse(at.exception)
 
         radio = self._get_operating_mode_radio(at)
         self.assertIn("Demo", radio.options)
-        self.assertIn("AWS (read-only)", radio.options)
+        self.assertNotIn("AWS (read-only)", radio.options)
         self.assertEqual(radio.value, "Demo")
 
     def test_theme_toggle(self):
@@ -64,6 +65,9 @@ class AppIntegrationTests(unittest.TestCase):
         self.assertIn("📊 Download Security Summary (CSV)", download_labels)
 
     def test_aws_scan_with_mocked_clients_and_pagination(self):
+        aws_enabled = patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "true"})
+        aws_enabled.start()
+        self.addCleanup(aws_enabled.stop)
         at = AppTest.from_file(self.app_path, default_timeout=15)
         at.run()
 
@@ -122,8 +126,8 @@ class AppIntegrationTests(unittest.TestCase):
             ],
         }
 
-        with patch("app.create_aws_clients") as mock_create, \
-             patch("app.audit_aws_account", return_value=mock_findings):
+        with patch("aws_auditor.create_aws_clients") as mock_create, \
+             patch("aws_auditor.audit_aws_account", return_value=mock_findings):
             mock_create.return_value = (Mock(), Mock(), Mock())
 
             btn = self._get_button_by_label(at, "Start AWS scan")
@@ -136,12 +140,12 @@ class AppIntegrationTests(unittest.TestCase):
             self.assertEqual(metrics.get("High Severity"), "2")
 
             # Check that pagination selector is rendered with 6 pages (52 items / 10 per page)
-            page_selectors = [sb for sb in at.selectbox if sb.key == "rec_page_selector"]
+            page_selectors = [number for number in at.number_input if number.key == "rec_page_All_10"]
             self.assertEqual(len(page_selectors), 1)
-            self.assertEqual(len(page_selectors[0].options), 6)
+            self.assertEqual(page_selectors[0].value, 1)
 
             # Test switching to page 2 of findings
-            page_selectors[0].set_value(page_selectors[0].options[1]).run()
+            page_selectors[0].set_value(2).run()
             self.assertFalse(at.exception)
 
             # Check that download buttons exist and are rendered cleanly
@@ -150,6 +154,9 @@ class AppIntegrationTests(unittest.TestCase):
             self.assertIn("📊 Download Security Summary (CSV)", download_labels)
 
     def test_aws_scan_error_handling(self):
+        aws_enabled = patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "true"})
+        aws_enabled.start()
+        self.addCleanup(aws_enabled.stop)
         at = AppTest.from_file(self.app_path, default_timeout=15)
         at.run()
 
@@ -158,7 +165,7 @@ class AppIntegrationTests(unittest.TestCase):
         mode_radio.set_value("AWS (read-only)").run()
 
         # Simulate exception during create_aws_clients
-        with patch("app.create_aws_clients", side_effect=Exception("No credentials found")):
+        with patch("aws_auditor.create_aws_clients", side_effect=Exception("No credentials found")):
             btn = self._get_button_by_label(at, "Start AWS scan")
             btn.click().run()
             self.assertFalse(at.exception)

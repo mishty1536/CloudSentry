@@ -144,6 +144,15 @@ class AuditS3AccountTests(unittest.TestCase):
 
         self.assertEqual(findings[0]["severity"], "Unknown")
 
+    def test_omitted_bucket_collection_is_unverified_not_empty(self):
+        s3 = Mock()
+        s3.list_buckets.return_value = {}
+
+        findings = audit_s3_account(s3)
+
+        self.assertTrue(any(f["severity"] == "Unknown" for f in findings))
+        self.assertFalse(any("No S3 buckets were returned" in f["finding"] for f in findings))
+
     def test_unexpected_encryption_response_is_unverified(self):
         s3 = Mock()
         s3.list_buckets.return_value = {"Buckets": [{"Name": "example-bucket"}]}
@@ -349,15 +358,16 @@ class AuditCloudTrailRegionTests(unittest.TestCase):
             Name="arn:aws:cloudtrail:us-east-1:123456789012:trail/regional-trail"
         )
 
-    def test_missing_trails_are_unverified_and_region_scoped(self):
+    def test_missing_trails_are_reported_for_selected_region(self):
         cloudtrail = Mock()
         cloudtrail.describe_trails.return_value = {"trailList": []}
 
         findings = audit_cloudtrail_region(cloudtrail, "ap-south-1")
 
-        self.assertEqual(findings[0]["severity"], "Unknown")
+        self.assertEqual(findings[0]["severity"], "Medium")
         self.assertEqual(findings[0]["region"], "ap-south-1")
         self.assertIn("other regions", findings[0]["recommendation"])
+        self.assertIn("organization-wide", findings[0]["recommendation"])
 
     def test_access_denied_is_unverified(self):
         cloudtrail = Mock()
@@ -394,6 +404,15 @@ class AuditCloudTrailRegionTests(unittest.TestCase):
         findings = audit_cloudtrail_region(cloudtrail, "us-east-1")
 
         self.assertEqual(findings[0]["severity"], "Unknown")
+
+    def test_omitted_trail_collection_is_unverified_not_no_trail(self):
+        cloudtrail = Mock()
+        cloudtrail.describe_trails.return_value = {}
+
+        findings = audit_cloudtrail_region(cloudtrail, "us-east-1")
+
+        self.assertEqual(findings[0]["severity"], "Unknown")
+        self.assertNotIn("No CloudTrail trail was returned", findings[0]["finding"])
 
 
 class AuditAwsAccountTests(unittest.TestCase):
