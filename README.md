@@ -1,60 +1,148 @@
 # CloudSentry — Cloud Security Misconfiguration Auditor
 
-CloudSentry is a Streamlit-based dashboard for assessing common cloud-security misconfigurations in Amazon Web Services (AWS). It provides security findings, recommendations, scan comparisons, and downloadable reports.
+> An automated, read-only cloud security assessment dashboard for detecting critical misconfigurations across Amazon Web Services (AWS) storage, identity, and governance services.
 
-The project supports two modes:
+[![Cloud](https://img.shields.io/badge/Cloud-AWS-232F3E?style=flat&logo=amazon-aws)](https://aws.amazon.com/)
+[![Security](https://img.shields.io/badge/Security-Posture%20%26%20Misconfiguration%20Audit-red?style=flat)](https://github.com/mishty1536/CloudSentry)
+[![Framework](https://img.shields.io/badge/Framework-Streamlit%201.66-FF4B4B?style=flat&logo=streamlit)](https://streamlit.io/)
+[![Language](https://img.shields.io/badge/Language-Python%203.11-3776AB?style=flat&logo=python)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat)](LICENSE)
 
-- **Demo mode:** Uses sample configurations and local sample data. It does not create AWS clients or call AWS APIs.
-- **AWS read-only mode:** Performs explicitly initiated checks against selected AWS security configurations when enabled in a suitable, controlled environment.
+---
 
-CloudSentry is an educational security-auditing prototype. Its findings are intended to assist security reviews and do not replace a comprehensive cloud security assessment.
+## Problem Statement
+
+Cloud infrastructure misconfigurations represent one of the leading causes of security incidents and data leaks in modern cloud environments. Common oversights—such as accidentally disabled S3 Block Public Access settings, unencrypted storage buckets, wildcard (`*`) administrative permissions in IAM policies, unmonitored root accounts, and disabled or regionalized CloudTrail trails—expose organizations to unauthorized access, data exposure, and untracked lateral movement.
+
+While enterprise Cloud Security Posture Management (CSPM) suites exist, they frequently require complex onboarding lifecycles, continuous high-privilege agent deployments, substantial recurring costs, and steep learning curves. Security engineers, cloud administrators, and developers need a lightweight, non-invasive assessment tool that:
+
+1. **Operates strictly on read-only principles:** Gathers security metadata without requiring create, update, or delete privileges, eliminating any risk of service downtime or unexpected configuration changes.
+2. **Surfaces clear, contextual findings:** Maps misconfigurations directly to affected resources and provides concrete remediation instructions.
+3. **Provides quantitative risk assessment:** Calculates a normalized risk score, visualizes security drift across successive scans, and exports professional PDF reports for auditing and compliance records.
+4. **Enables safe, offline exploration:** Includes a zero-credential Demo mode allowing users to simulate and learn about misconfiguration scenarios safely without live AWS credentials or cloud bills.
+
+---
 
 ## Live Demo
 
 **Application URL:** http://3.26.214.34:8501
 
-CloudSentry is deployed on an Amazon EC2 instance running Amazon Linux 2023. The current public deployment runs in Demo mode and uses sample configurations.
+CloudSentry is deployed on an Amazon EC2 instance running Amazon Linux 2023. The public demo deployment operates in Demo mode using sample configurations.
 
 > **Security notice:** The demo is served over HTTP, and port 8501 is publicly accessible. Do not submit sensitive information to this deployment. AWS live scanning must remain disabled for this unauthenticated public demo.
 
 The application is available while the EC2 instance and Streamlit process are running. Its public IP address may change if the instance is stopped and restarted.
 
-## Features
+---
 
-- **S3 Security Auditing:** Checks selected bucket-level public-access-block and default encryption configurations.
-- **IAM Security Auditing:** Reviews selected account-level IAM security indicators and identity-policy documents.
-- **CloudTrail Auditing:** Checks selected trail logging and configuration indicators in a chosen AWS region.
-- **Security Findings:** Displays findings with severity classifications and explanations.
-- **Recommendations:** Provides suggestions to help address identified security issues.
-- **Scan Comparison:** Compares scan results to help identify changes in security findings.
-- **Risk Score:** Provides a prototype risk score based on the application's existing scoring formula.
-- **Report Download:** Allows users to download a report of scan results.
-- **Demo Mode:** Supports demonstrations without AWS credentials or live AWS API calls.
-- **Read-only AWS Checks:** Uses Boto3 to retrieve selected configuration information without creating, updating, or deleting AWS resources.
-- **Unknown / Unverified Results:** Represents checks that cannot be verified rather than automatically treating them as secure or vulnerable.
+## Feature List
+
+- **S3 Storage Security Auditing:**
+  - Evaluates bucket-level S3 Block Public Access configurations (`BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, `RestrictPublicBuckets`).
+  - Verifies default server-side encryption (SSE) status for general-purpose S3 buckets.
+- **IAM Identity & Privilege Auditing:**
+  - Reviews account-level security hygiene, specifically checking whether Multi-Factor Authentication (MFA) is active on the root user.
+  - Audits inline identity policy documents and default versions of attached managed policies to detect wildcard privileges (`Action: *`, `Resource: *`).
+  - Flags heuristic risk indicators including `NotAction` and `NotResource` blocks for contextual security review.
+- **CloudTrail Governance & Logging Auditing:**
+  - Checks operational trail logging status (`IsLogging`) within the selected AWS region.
+  - Verifies cryptographic log file integrity validation settings.
+  - Evaluates multi-region trail configuration and distinguishes regional trails from account-wide coverage.
+- **Risk Scoring & Posture Metrics:**
+  - Aggregates findings into standard severity classifications (`High`, `Medium`, `Low`, `Unknown`, `Info`).
+  - Computes a normalized 0–100 risk score based on average finding severity, paired with qualitative posture classifications (`Low Risk`, `Moderate Risk`, `High Risk`).
+- **Scan Comparison (Before vs. After):**
+  - Retains scan history within the user session.
+  - Calculates numerical deltas across scan iterations to visualize posture improvement or security drift following remediation.
+- **Executive & Technical PDF Report Export:**
+  - Generates downloadable, styled PDF reports on-demand directly from the dashboard using ReportLab.
+  - Exports both full **Security Audit Reports** (detailed findings table with multi-page support) and **Security Summary Reports** (high-level executive metrics).
+- **Dual Operating Modes:**
+  - **Demo Mode:** Simulates AWS configurations using interactive sample toggles—completely offline, zero credentials required.
+  - **AWS (Read-Only) Mode:** Connects via Boto3 credential provider chain (IAM role, AWS SSO, or local profile) to query live configuration metadata without modifying any resources.
+- **Transparent Status Handling:**
+  - Differentiates verified compliant/vulnerable states from **Unknown / Unverified** states when API calls are throttled, denied, or unconfigured, preventing false senses of security.
+
+---
 
 ## Technology Stack
 
-- **Language:** Python
-- **Dashboard:** Streamlit
-- **Data processing:** Pandas
-- **AWS SDK:** Boto3
-- **Cloud platform:** Amazon Web Services (AWS)
-- **Compute and hosting:** Amazon EC2
-- **Operating system:** Amazon Linux 2023
-- **Version control:** Git and GitHub
-- **Testing:** Python `unittest` with mocked AWS clients
+| Layer | Component | Technology | Description |
+|---|---|---|---|
+| **Frontend & UI** | Dashboard Framework | **Streamlit (v1.66+)** | Interactive single-page web dashboard with dark and light theme support |
+| **Styling & Typography** | Design System | **Custom CSS (`theme.css`)** | Enterprise dark-palette design tokens with responsive Inter sans-serif typography |
+| **Data Processing** | Data Manipulation | **Pandas (v3.0+)** | Findings aggregation, tabular transformation, and display formatting |
+| **Cloud Integration** | AWS SDK | **Boto3 & Botocore (v1.43+)** | Read-only AWS API interactions across S3, IAM, CloudTrail, and EC2 |
+| **Document Generation** | Reporting Engine | **ReportLab (v4.0+)** | In-memory PDF generation with styled tables, column wrapping, and pagination |
+| **Runtime & Language** | Core Engine | **Python 3.11** | Backend execution runtime |
+| **Hosting & Compute** | Cloud Infrastructure | **Amazon EC2** | Amazon Linux 2023 instance hosting the Streamlit web service |
+| **Testing & Quality** | Quality Assurance | **Python `unittest` & Botocore `Stubber`** | Automated test suite with 85 unit and integration tests using mocked AWS clients |
 
-## Architecture Overview
+---
 
-1. The user interacts with the Streamlit dashboard.
-2. In Demo mode, the application evaluates sample configurations without making AWS API calls.
-3. In AWS mode, when explicitly enabled and started, the relevant auditor modules use Boto3 to retrieve selected AWS configuration information.
-4. The audit logic evaluates the available configuration data and generates findings.
-5. The dashboard displays findings, recommendations, and the prototype risk score.
-6. Users can compare scan results and download reports.
+## System Architecture
 
-The application contains separate auditor modules for S3, IAM, and CloudTrail, alongside shared dashboard helpers and a dedicated test suite.
+### Architectural Diagram
+
+```mermaid
+flowchart TD
+    subgraph UI_Layer["Presentation Layer (Streamlit & CSS)"]
+        UI["Streamlit Dashboard (app.py)"]
+        Theme["Enterprise Theme (theme.css)"]
+    end
+
+    subgraph Data_Sources["Data Acquisition Layer"]
+        DemoConfig["Sample Configurations (Demo Mode)"]
+        BotoClient["Boto3 Session (AWS Read-Only Mode)"]
+    end
+
+    subgraph Auditor_Modules["Auditor Core Engines"]
+        S3Audit["S3 Auditor (s3_auditor.py)"]
+        IAMAudit["IAM Auditor (iam_auditor.py)"]
+        CTAudit["CloudTrail Auditor (cloudTrail_auditor.py)"]
+        AWSEngine["AWS Auditor Coordinator (aws_auditor.py)"]
+    end
+
+    subgraph Processing_Layer["Normalization & Risk Engine"]
+        Helpers["Dashboard Helpers (dashboard_helpers.py)"]
+        SeverityCount["Severity Aggregation & Point Weights"]
+        RiskScore["Risk Score Formula & Assessment Status"]
+    end
+
+    subgraph Output_Layer["Visualization & Report Delivery"]
+        Overview["Metrics, Charts & Before/After Deltas"]
+        PDFGen["ReportLab PDF Generator"]
+    end
+
+    UI -->|Operating Mode Selection| Data_Sources
+    DemoConfig -->|Synthetic Configuration| S3Audit & IAMAudit & CTAudit
+    BotoClient -->|Read-Only API Calls| AWSEngine
+    AWSEngine --> S3Audit & IAMAudit & CTAudit
+
+    S3Audit & IAMAudit & CTAudit --> Helpers
+    Helpers --> SeverityCount --> RiskScore
+    RiskScore --> Overview
+    RiskScore --> PDFGen
+    Overview --> UI
+    PDFGen -->|Download PDF| UI
+```
+
+### Data Flow Overview
+
+1. **User Interaction & Mode Selection:** The user selects either **Demo** mode or **AWS (read-only)** mode in the sidebar.
+2. **Configuration Ingestion:**
+   - In **Demo Mode**, sample configuration parameters (public ACL blocks, encryption settings, IAM wildcard toggles) are read directly from UI controls without network calls.
+   - In **AWS Mode**, `aws_auditor.py` initializes a read-only `boto3.Session` using the ambient credential chain (EC2 IAM Role, local AWS profile, or environment variables).
+3. **Auditor Execution & Heuristic Evaluation:**
+   - Service responses are evaluated by specialized auditor modules (`s3_auditor.py`, `iam_auditor.py`, `cloudTrail_auditor.py`).
+   - Each module tests configurations against security baseline rules, returning standardized finding dictionaries containing `service`, `severity`, `resource`, `finding`, and `recommendation`.
+4. **Data Normalization & Scoring:**
+   - `dashboard_helpers.py` aggregates findings across services, normalizes missing fields, and calculates a normalized 0–100 risk score based on finding severities.
+   - Checks that could not be verified due to missing read permissions or throttled calls are marked `Unknown`, ensuring incomplete assessments are transparently reported as `Incomplete`.
+5. **Presentation & Export:**
+   - Streamlit displays metrics, interactive filters, comparative before-and-after deltas, and step-by-step remediation guides.
+   - Users can trigger on-demand generation of styled PDF audit reports compiled in-memory via ReportLab.
+
 
 ## Project Structure
 
