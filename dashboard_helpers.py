@@ -125,3 +125,35 @@ def make_findings_dataframe(findings):
     df = pd.DataFrame(records)
     extra_columns = [column for column in df.columns if column not in FINDING_COLUMNS]
     return df[FINDING_COLUMNS + extra_columns]
+
+
+def prepare_dataframe_for_display(df, resource_limit=96, recommendation_limit=220):
+    """Shorten long table cells on a copy; exports and scan data stay complete."""
+    display_df = df.copy()
+    shortened = False
+
+    def shorten(value, limit, preserve_arn=False):
+        nonlocal shortened
+        if not isinstance(value, str) or len(value) <= limit:
+            return value
+        shortened = True
+        if preserve_arn and value.startswith("arn:"):
+            parts = value.split(":", 5)
+            if len(parts) == 6:
+                prefix = ":".join(parts[:5]) + ":"
+                budget = max(12, limit - len(prefix) - 1)
+                head = max(8, (budget * 2) // 3)
+                tail = max(4, budget - head)
+                return f"{prefix}{parts[5][:head]}…{parts[5][-tail:]}"
+        head = max(1, limit - 1)
+        return f"{value[:head]}…"
+
+    if "resource" in display_df.columns:
+        display_df["resource"] = display_df["resource"].map(
+            lambda value: shorten(value, resource_limit, preserve_arn=True)
+        )
+    if "recommendation" in display_df.columns:
+        display_df["recommendation"] = display_df["recommendation"].map(
+            lambda value: shorten(value, recommendation_limit)
+        )
+    return display_df, shortened

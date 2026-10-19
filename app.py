@@ -22,6 +22,7 @@ from dashboard_helpers import (
     combine_findings,
     count_severity,
     make_findings_dataframe,
+    prepare_dataframe_for_display,
 )
 
 aws_scan_logger = logging.getLogger("cloudsentry.aws_scan")
@@ -216,6 +217,10 @@ def display_dataframe(df, *, hide_index=True):
     else:
         df = df.copy().reset_index(drop=True)
         df = df.astype(object).where(pd.notna(df), "—")
+
+    df, has_shortened_values = prepare_dataframe_for_display(df)
+    if has_shortened_values:
+        st.caption("Long resource and recommendation cells are shortened in this table; CSV exports retain the full values.")
 
     dark_mode = st.session_state.get("theme_mode", "Dark") == "Dark"
     if dark_mode:

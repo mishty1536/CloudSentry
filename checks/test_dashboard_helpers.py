@@ -1,11 +1,14 @@
 import unittest
 
+import pandas as pd
+
 from dashboard_helpers import (
     assessment_status,
     calculate_risk_score,
     combine_findings,
     count_severity,
     make_findings_dataframe,
+    prepare_dataframe_for_display,
 )
 
 
@@ -74,6 +77,23 @@ class DashboardHelperTests(unittest.TestCase):
         self.assertEqual(df.loc[0, "severity"], "Unknown")
         self.assertEqual(df.loc[1, "finding"], "Unexpected finding data could not be parsed")
         self.assertEqual(len(df), 2)
+
+    def test_long_display_cells_are_shortened_without_mutating_export_data(self):
+        resource = "arn:aws:iam::123456789012:policy/" + "VeryLongPolicyName" * 12
+        recommendation = "Review this recommendation carefully. " * 20
+        report_df = pd.DataFrame([{
+            "resource": resource,
+            "recommendation": recommendation,
+        }])
+
+        display_df, shortened = prepare_dataframe_for_display(report_df)
+
+        self.assertTrue(shortened)
+        self.assertLess(len(display_df.loc[0, "resource"]), len(resource))
+        self.assertTrue(display_df.loc[0, "resource"].startswith("arn:aws:iam::123456789012:"))
+        self.assertLess(len(display_df.loc[0, "recommendation"]), len(recommendation))
+        self.assertEqual(report_df.loc[0, "resource"], resource)
+        self.assertEqual(report_df.loc[0, "recommendation"], recommendation)
 
 
 if __name__ == "__main__":

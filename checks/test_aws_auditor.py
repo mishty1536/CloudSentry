@@ -250,6 +250,212 @@ class AuditIamAccountTests(unittest.TestCase):
         self.assertTrue(any(f["severity"] == "Medium" and f.get("policy_type") == "Managed" for f in findings))
         iam.get_account_authorization_details.assert_called_once()
 
+    def test_aws_managed_service_linked_policy_is_contextual_and_not_suppressed(self):
+        iam = Mock()
+        iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 1}}
+        aws_arn = "arn:aws:iam::aws:policy/aws-service-role/ExampleServicePolicy"
+        service_role_arn = "arn:aws:iam::aws:policy/service-role/ExampleServiceRolePolicy"
+        customer_arn = "arn:aws:iam::123456789012:policy/CustomerWide"
+        wildcard = quote(json.dumps(iam_policy({
+            "Effect": "Allow", "Action": "*", "Resource": "*"
+        })))
+        iam.get_account_authorization_details.return_value = {
+            "IsTruncated": False,
+            "UserDetailList": [],
+            "GroupDetailList": [],
+            "RoleDetailList": [
+                {
+                    "RoleName": "AWSServiceRole",
+                    "Path": "/aws-service-role/example.amazonaws.com/",
+                    "RolePolicyList": [],
+                    "AttachedManagedPolicies": [{"PolicyArn": aws_arn}],
+                },
+                {
+                    "RoleName": "CustomerRole",
+                    "Path": "/",
+                    "RolePolicyList": [],
+                    "AttachedManagedPolicies": [{"PolicyArn": customer_arn}],
+                },
+                {
+                    "RoleName": "ServiceRole",
+                    "Path": "/service-role/",
+                    "RolePolicyList": [],
+                    "AttachedManagedPolicies": [{"PolicyArn": service_role_arn}],
+                },
+            ],
+            "Policies": [
+                {"Arn": arn, "PolicyName": arn.rsplit("/", 1)[-1], "PolicyVersionList": [
+                    {"IsDefaultVersion": True, "Document": wildcard}
+                ]}
+                for arn in (aws_arn, customer_arn, service_role_arn)
+            ],
+        }
+
+        findings = audit_iam_account(iam)
+        wildcard_findings = [
+            f for f in findings
+            if "wildcard" in f.get("recommendation", "").lower()
+        ]
+        aws_finding = next(f for f in wildcard_findings if f["policy_origin"] == "AWS-managed")
+        customer_finding = next(f for f in wildcard_findings if f["policy_origin"] == "customer-managed")
+
+        self.assertEqual(len(wildcard_findings), 3)
+        self.assertEqual(aws_finding["policy_category"], "service-linked-role policy")
+        self.assertEqual(aws_finding["principal_type"], "service-linked role")
+        self.assertEqual(aws_finding["severity"], "Info")
+        self.assertEqual(aws_finding["heuristic_severity"], "High")
+        self.assertIn("AWS-managed", aws_finding["finding"])
+        self.assertIn("not by itself proof", aws_finding["recommendation"])
+        self.assertEqual(customer_finding["principal_type"], "IAM role")
+        self.assertEqual(customer_finding["finding"], "Broad permissions across wildcard actions and resources")
+        service_role_finding = next(
+            f for f in wildcard_findings if f["policy_category"] == "service-role policy"
+        )
+        self.assertEqual(service_role_finding["principal_type"], "service role")
+
+    def test_malformed_iam_policy_arns_are_unknown_and_never_downgraded(self):
+        iam = Mock()
+        iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 1}}
+        malformed_arns = [
+            "arn:aws:iam::aws:role/aws-service-role/InvalidResource",
+            "not-arn:aws:iam::aws:policy/aws-service-role/InvalidPrefix",
+            "arn:aws:iam::not-an-account:policy/aws-service-role/InvalidOwner",
+            "arn:aws:iam:us-east-1:aws:policy/aws-service-role/InvalidRegion",
+        ]
+        policy_document = quote(json.dumps(iam_policy({
+            "Effect": "Allow", "Action": "*", "Resource": "*"
+        })))
+        iam.get_account_authorization_details.return_value = {
+            "IsTruncated": False,
+            "UserDetailList": [],
+            "GroupDetailList": [],
+            "RoleDetailList": [{
+                "RoleName": "AWSServiceRole",
+                "Path": "/aws-service-role/example.amazonaws.com/",
+                "RolePolicyList": [],
+                "AttachedManagedPolicies": [
+                    {"PolicyArn": arn} for arn in malformed_arns
+                ],
+            }],
+            "Policies": [
+                {
+                    "Arn": arn,
+                    "PolicyName": f"InvalidPolicy{index}",
+                    "PolicyVersionList": [{
+                        "IsDefaultVersion": True,
+                        "Document": policy_document,
+                    }],
+                }
+                for index, arn in enumerate(malformed_arns)
+            ],
+        }
+
+        findings = audit_iam_account(iam)
+        malformed_policy_findings = [
+            finding for finding in findings
+            if finding.get("policy_type") == "Managed"
+            and finding.get("policy_name", "").startswith("InvalidPolicy")
+        ]
+
+        self.assertEqual(len(malformed_policy_findings), len(malformed_arns))
+        for finding in malformed_policy_findings:
+            with self.subTest(policy=finding["policy_name"]):
+                self.assertEqual(finding["policy_origin"], "unknown")
+                self.assertEqual(finding["policy_category"], "unknown")
+                self.assertEqual(finding["severity"], "High")
+                self.assertNotIn("heuristic_severity", finding)
+
+    def test_shared_service_linked_policy_is_not_downgraded_for_mixed_principals(self):
+        iam = Mock()
+        iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 1}}
+        policy_arn = "arn:aws:iam::aws:policy/aws-service-role/ExampleServicePolicy"
+        policy_document = quote(json.dumps(iam_policy({
+            "Effect": "Allow", "Action": "*", "Resource": "*"
+        })))
+        iam.get_account_authorization_details.return_value = {
+            "IsTruncated": False,
+            "UserDetailList": [],
+            "GroupDetailList": [],
+            "RoleDetailList": [
+                {
+                    "RoleName": "AWSServiceRole",
+                    "Path": "/aws-service-role/example.amazonaws.com/",
+                    "RolePolicyList": [],
+                    "AttachedManagedPolicies": [{"PolicyArn": policy_arn}],
+                },
+                {
+                    "RoleName": "OrdinaryRole",
+                    "Path": "/",
+                    "RolePolicyList": [],
+                    "AttachedManagedPolicies": [{"PolicyArn": policy_arn}],
+                },
+            ],
+            "Policies": [{
+                "Arn": policy_arn,
+                "PolicyName": "ExampleServicePolicy",
+                "PolicyVersionList": [{"IsDefaultVersion": True, "Document": policy_document}],
+            }],
+        }
+
+        findings = audit_iam_account(iam)
+        wildcard = next(
+            finding for finding in findings
+            if finding.get("policy_name") == "ExampleServicePolicy"
+            and "wildcard" in finding.get("recommendation", "").lower()
+        )
+
+        self.assertEqual(wildcard["severity"], "High")
+        self.assertNotIn("heuristic_severity", wildcard)
+        self.assertIn("IAM role", wildcard["principal_type"])
+        self.assertIn("OrdinaryRole", wildcard["attached_to"])
+
+    def test_incomplete_principal_inventory_prevents_service_linked_downgrade(self):
+        iam = Mock()
+        iam.get_account_summary.return_value = {"SummaryMap": {"AccountMFAEnabled": 1}}
+        policy_arn = "arn:aws:iam::aws:policy/aws-service-role/ExampleServicePolicy"
+        policy_document = quote(json.dumps(iam_policy({
+            "Effect": "Allow", "Action": "*", "Resource": "*"
+        })))
+        iam.get_account_authorization_details.return_value = {
+            "IsTruncated": False,
+            "UserDetailList": [],
+            "GroupDetailList": [],
+            "RoleDetailList": [
+                {
+                    "RoleName": "AWSServiceRole",
+                    "Path": "/aws-service-role/example.amazonaws.com/",
+                    "RolePolicyList": [],
+                    "AttachedManagedPolicies": [{"PolicyArn": policy_arn}],
+                },
+                {
+                    "RoleName": "IncompleteRole",
+                    "Path": "/",
+                    "RolePolicyList": [],
+                },
+                {
+                    "Path": "/aws-service-role/unknown.amazonaws.com/",
+                    "RolePolicyList": [],
+                    "AttachedManagedPolicies": [{"PolicyArn": policy_arn}],
+                },
+            ],
+            "Policies": [{
+                "Arn": policy_arn,
+                "PolicyName": "ExampleServicePolicy",
+                "PolicyVersionList": [{"IsDefaultVersion": True, "Document": policy_document}],
+            }],
+        }
+
+        findings = audit_iam_account(iam)
+        wildcard = next(
+            finding for finding in findings
+            if finding.get("policy_name") == "ExampleServicePolicy"
+            and "wildcard" in finding.get("recommendation", "").lower()
+        )
+
+        self.assertEqual(wildcard["severity"], "High")
+        self.assertNotIn("heuristic_severity", wildcard)
+        self.assertTrue(any(finding["severity"] == "Unknown" for finding in findings))
+
     def test_missing_account_mfa_value_is_unverified(self):
         iam = Mock()
         iam.get_account_summary.return_value = {"SummaryMap": {}}
@@ -371,6 +577,58 @@ class AuditCloudTrailRegionTests(unittest.TestCase):
         self.assertEqual(findings[0]["region"], "ap-south-1")
         self.assertIn("other regions", findings[0]["recommendation"])
         self.assertIn("organization-wide", findings[0]["recommendation"])
+        self.assertIn("selected region", findings[0]["finding"])
+        self.assertEqual(findings[0]["coverage_scope"], "selected region only")
+
+    def test_regional_trail_is_not_flagged_if_multi_region_trail_covers_region(self):
+        cloudtrail = Mock()
+        cloudtrail.describe_trails.return_value = {"trailList": [
+            {
+                "Name": "regional-trail", "HomeRegion": "ap-southeast-2",
+                "IsMultiRegionTrail": False, "LogFileValidationEnabled": True,
+            },
+            {
+                "Name": "organization-trail", "HomeRegion": "us-east-1",
+                "IsMultiRegionTrail": True, "IsOrganizationTrail": True,
+                "LogFileValidationEnabled": True,
+            },
+        ]}
+        cloudtrail.get_trail_status.return_value = {"IsLogging": True}
+
+        findings = audit_cloudtrail_region(cloudtrail, "ap-southeast-2")
+
+        self.assertFalse(any("No multi-region" in f["finding"] for f in findings))
+        self.assertFalse(any(
+            "multi-region coverage is not enabled" in f["finding"] for f in findings
+        ))
+        self.assertTrue(any(f["severity"] == "Info" for f in findings))
+
+    def test_only_regional_trails_report_limited_scope(self):
+        cloudtrail = Mock()
+        cloudtrail.describe_trails.return_value = {"trailList": [{
+            "Name": "regional", "HomeRegion": "ap-southeast-2",
+            "IsMultiRegionTrail": False, "LogFileValidationEnabled": True,
+        }]}
+        cloudtrail.get_trail_status.return_value = {"IsLogging": True}
+
+        findings = audit_cloudtrail_region(cloudtrail, "ap-southeast-2")
+
+        coverage = next(f for f in findings if "No multi-region" in f["finding"])
+        self.assertEqual(coverage["severity"], "Medium")
+        self.assertIn("selected region", coverage["recommendation"])
+
+    def test_unsupported_cloudtrail_operation_is_unverified_not_absent(self):
+        cloudtrail = Mock()
+        cloudtrail.describe_trails.side_effect = client_error(
+            "UnsupportedOperationException", "DescribeTrails"
+        )
+
+        findings = audit_cloudtrail_region(cloudtrail, "mock-region-1")
+
+        self.assertEqual(findings[0]["severity"], "Unknown")
+        self.assertEqual(findings[0]["error_code"], "UnsupportedOperationException")
+        self.assertIn("unsupported", findings[0]["recommendation"])
+        self.assertFalse(any("No CloudTrail trail" in f["finding"] for f in findings))
 
     def test_access_denied_is_unverified(self):
         cloudtrail = Mock()
@@ -399,6 +657,29 @@ class AuditCloudTrailRegionTests(unittest.TestCase):
         findings = audit_cloudtrail_region(cloudtrail, "us-east-2")
 
         self.assertGreaterEqual(sum(f["severity"] == "Unknown" for f in findings), 3)
+
+    def test_missing_or_malformed_multi_region_flag_has_unknown_trail_scope(self):
+        for case, flag in (("missing", None), ("malformed", "true")):
+            with self.subTest(case=case):
+                trail = {"Name": "trail", "LogFileValidationEnabled": False}
+                if case == "malformed":
+                    trail["IsMultiRegionTrail"] = flag
+                cloudtrail = Mock()
+                cloudtrail.describe_trails.return_value = {"trailList": [trail]}
+                cloudtrail.get_trail_status.return_value = {"IsLogging": True}
+
+                findings = audit_cloudtrail_region(cloudtrail, "ap-southeast-2")
+
+                validation = next(
+                    finding for finding in findings
+                    if finding.get("finding") == "CloudTrail log file validation is not enabled"
+                )
+                self.assertEqual(validation["trail_scope"], "unknown")
+                self.assertTrue(any(
+                    finding["severity"] == "Unknown"
+                    and finding.get("operation") == "DescribeTrails"
+                    for finding in findings
+                ))
 
     def test_unexpected_trail_response_is_unverified(self):
         cloudtrail = Mock()

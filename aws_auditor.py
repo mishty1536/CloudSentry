@@ -6,6 +6,7 @@ explicit scan action in the UI.
 """
 
 import json
+import re
 from urllib.parse import unquote
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -43,6 +44,8 @@ def _error_reason(error):
         return "AWS denied this read-only check. Grant only its documented read permission or retain this unverified result."
     if "throttl" in lowered or "slowdown" in lowered or "requestlimit" in lowered:
         return "AWS throttled this read-only check. Retry later; this result is unverified."
+    if "unsupported" in lowered or "invalidregion" in lowered or "notavailableinregion" in lowered:
+        return "This AWS operation or service is unsupported in the selected region. Coverage is unverified, not absent."
     if "unavailable" in lowered or "internalerror" in lowered or "endpointconnection" in lowered:
         return "The AWS service or endpoint is unavailable. Retry later; this result is unverified."
     return "The AWS response could not be verified. Review the operation and retry if appropriate."
@@ -80,6 +83,138 @@ def _parse_policy_document(document):
         if isinstance(parsed, dict):
             return parsed
     raise ValueError("Policy document is not a JSON object")
+
+
+def _iam_policy_origin(policy_arn):
+    """Classify managed policy ownership from its ARN without inferring risk."""
+    if not isinstance(policy_arn, str):
+        return "unknown", "unknown"
+    parts = policy_arn.split(":", 5)
+    if (
+        len(parts) != 6
+        or parts[0] != "arn"
+        or not re.fullmatch(r"aws(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?", parts[1])
+        or parts[2] != "iam"
+        or parts[3] != ""
+        or not parts[5].startswith("policy/")
+    ):
+        return "unknown", "unknown"
+
+    policy_resource = parts[5][len("policy/"):]
+    path_parts = policy_resource.split("/")
+    if (
+        not policy_resource
+        or any(not part for part in path_parts)
+        or any(
+            not character.isascii()
+            or character.isspace()
+            or ord(character) < 33
+            or ord(character) > 126
+            for character in policy_resource
+        )
+        or ":" in policy_resource
+        or not re.fullmatch(r"[A-Za-z0-9+=,.@_-]+", path_parts[-1])
+    ):
+        return "unknown", "unknown"
+
+    if re.fullmatch(r"[0-9]{12}", parts[4]):
+        return "customer-managed", "customer-managed"
+    if parts[4] != "aws":
+        return "unknown", "unknown"
+
+    policy_path = policy_resource
+    if policy_path.startswith("aws-service-role/"):
+        return "AWS-managed", "service-linked-role policy"
+    if policy_path.startswith("service-role/"):
+        return "AWS-managed", "service-role policy"
+    return "AWS-managed", "AWS-managed policy"
+
+
+def _principal_context(entity_type, entity):
+    name_key = {"User": "UserName", "Group": "GroupName", "Role": "RoleName"}[entity_type]
+    raw_name = entity.get(name_key)
+    name_is_valid = isinstance(raw_name, str) and bool(raw_name.strip())
+    name = raw_name if name_is_valid else "Unknown"
+    principal = f"{entity_type}:{name}"
+    context = {
+        "principal": principal,
+        "principal_type": entity_type.lower(),
+        "principal_identity_complete": name_is_valid,
+    }
+    if entity_type != "Role":
+        return context
+
+    path = entity.get("Path")
+    context["principal_path"] = path if isinstance(path, str) else "Unknown"
+    context["principal_identity_complete"] = (
+        name_is_valid and isinstance(path, str) and bool(path)
+    )
+    if isinstance(path, str) and path.startswith("/aws-service-role/"):
+        context["principal_type"] = "service-linked role"
+    elif isinstance(path, str) and path.startswith("/service-role/"):
+        context["principal_type"] = "service role"
+    elif isinstance(path, str):
+        context["principal_type"] = "IAM role"
+    else:
+        context["principal_type"] = "IAM role (path unavailable)"
+    return context
+
+
+def _contextualize_policy_findings(findings, *, origin, policy_category, principals,
+                                   resource, policy_name, policy_type,
+                                   attachment_inventory_complete=False):
+    principal_names = [item["principal"] for item in principals]
+    principal_types = sorted({item["principal_type"] for item in principals})
+    principal_paths = sorted({
+        item["principal_path"] for item in principals if "principal_path" in item
+    })
+    contextual = []
+    for finding in findings:
+        item = _add_context(
+            finding,
+            resource=resource,
+            policy_name=policy_name,
+            policy_type=policy_type,
+            policy_origin=origin,
+            policy_category=policy_category,
+            attached_to=", ".join(principal_names),
+            principal_type=", ".join(principal_types) if principal_types else "unknown",
+        )
+        if principal_paths:
+            item["principal_path"] = ", ".join(principal_paths)
+        is_wildcard_finding = (
+            "wildcard" in str(item.get("finding", "")).lower()
+            or "wildcard" in str(item.get("recommendation", "")).lower()
+        )
+        if origin == "AWS-managed" and is_wildcard_finding:
+            item["finding"] = f"{item['finding']} (AWS-managed {policy_category})"
+            item["recommendation"] = (
+                f"{item['recommendation']} This policy is maintained by AWS; the wildcard pattern "
+                "is a review signal, not by itself proof of a customer-authored policy defect. "
+                "Confirm the documented AWS service use and that the policy is attached only "
+                "to the intended principal."
+            )
+            all_principals_are_service_linked = bool(principals) and all(
+                item.get("principal_type") == "service-linked role"
+                and item.get("principal_identity_complete") is True
+                and isinstance(item.get("principal_path"), str)
+                and item["principal_path"].startswith("/aws-service-role/")
+                for item in principals
+            )
+            if (
+                policy_category == "service-linked-role policy"
+                and attachment_inventory_complete
+                and all_principals_are_service_linked
+            ):
+                item["heuristic_severity"] = item.get("severity", "Unknown")
+                item["severity"] = "Info"
+                item["finding"] += " (informational AWS-managed service-linked permissions pattern)"
+                item["recommendation"] += (
+                    " AWS manages this service-linked role and its permissions; this heuristic is "
+                    "shown for visibility but is not scored as a customer-authored policy risk."
+                )
+        contextual.append(item)
+    return contextual
 
 
 def _response_list(response, key, service, operation, findings):
@@ -364,6 +499,7 @@ def audit_iam_account(iam_client):
                 ))
                 continue
             entity_name = entity.get(name_key, "Unknown")
+            principal_info = _principal_context(entity_type, entity)
             inline_policies = entity.get(inline_key, [])
 
             if inline_policies is None:
@@ -389,12 +525,15 @@ def audit_iam_account(iam_client):
                         "IAM", "InspectInlinePolicy", "Inline policy document was missing or malformed.", str(entity_name)
                     ))
                     continue
-                findings.extend(_add_context(
-                    item,
+                findings.extend(_contextualize_policy_findings(
+                    audit_iam_policy(policy),
+                    origin="customer-created inline policy",
+                    policy_category="inline policy",
+                    principals=[principal_info],
                     resource=f"{entity_type}:{entity_name}",
                     policy_name=policy_name,
                     policy_type="Inline",
-                ) for item in audit_iam_policy(policy))
+                ))
 
             attached = entity.get("AttachedManagedPolicies")
             if attached is None and "AttachedManagedPolicies" not in entity:
@@ -417,7 +556,7 @@ def audit_iam_account(iam_client):
                     ))
                     continue
                 arn = policy_ref["PolicyArn"]
-                attachments.setdefault(arn, []).append(f"{entity_type}:{entity_name}")
+                attachments.setdefault(arn, []).append(principal_info)
 
     managed_by_arn = {}
     for policy in details["Policies"]:
@@ -459,13 +598,17 @@ def audit_iam_account(iam_client):
                 "IAM", "InspectManagedPolicy", "Attached managed policy document was missing or malformed.", arn
             ))
             continue
-        findings.extend(_add_context(
-            item,
+        origin, policy_category = _iam_policy_origin(arn)
+        findings.extend(_contextualize_policy_findings(
+            audit_iam_policy(document),
+            origin=origin,
+            policy_category=policy_category,
+            principals=principals,
             resource=arn,
             policy_name=policy_metadata.get("PolicyName", arn),
             policy_type="Managed",
-            attached_to=", ".join(principals),
-        ) for item in audit_iam_policy(document))
+            attachment_inventory_complete=policy_inventory_complete,
+        ))
 
     if policy_inventory_complete and not attachments and inline_policy_count == 0:
         findings.append({
@@ -478,7 +621,7 @@ def audit_iam_account(iam_client):
 
 
 def audit_cloudtrail_region(cloudtrail_client, region):
-    """Inspect trail configuration and logging status in one AWS region."""
+    """Inspect trails visible in one region, including associated shadow trails."""
     findings = []
     try:
         response = cloudtrail_client.describe_trails(includeShadowTrails=True)
@@ -498,15 +641,24 @@ def audit_cloudtrail_region(cloudtrail_client, region):
         return [{
             "service": "CloudTrail",
             "severity": "Medium",
-            "finding": f"No CloudTrail trail was returned for {region}",
+            "finding": f"No CloudTrail trail was returned for the selected region ({region})",
             "recommendation": (
-                "Review whether a CloudTrail trail should be configured in this region "
-                "to retain and deliver audit logs. This result does not establish "
-                "CloudTrail coverage in other regions or organization-wide."
+                "DescribeTrails returned no regional or associated shadow trail for this region. "
+                "Review whether audit logging should cover it. This confirms only the selected-region "
+                "response; it does not establish coverage in other regions or organization-wide."
             ),
             "operation": "DescribeTrails",
             "region": region,
+            "coverage_scope": "selected region only",
         }]
+
+    parsed_trails = [trail for trail in trails if isinstance(trail, dict)]
+    has_multi_region_coverage = any(
+        trail.get("IsMultiRegionTrail") is True for trail in parsed_trails
+    )
+    multi_region_status_known = len(parsed_trails) == len(trails) and all(
+        isinstance(trail.get("IsMultiRegionTrail"), bool) for trail in parsed_trails
+    )
 
     for trail in trails:
         if not isinstance(trail, dict):
@@ -517,9 +669,24 @@ def audit_cloudtrail_region(cloudtrail_client, region):
         trail_arn = trail.get("TrailARN")
         name = trail_arn or trail.get("Name")
         trail_label = str(name or "Unknown trail")
-        for key, field_label, severity in (
-            ("IsMultiRegionTrail", "multi-region coverage", "Medium"),
-            ("LogFileValidationEnabled", "log file validation", "Medium"),
+        trail_is_multi_region = trail.get("IsMultiRegionTrail")
+        if not isinstance(trail_is_multi_region, bool):
+            findings.append(_unverified(
+                "CloudTrail", "DescribeTrails", "AWS did not return a valid trail scope value; multi-region coverage is unverified.", trail_label, region
+            ))
+
+        home_region = trail.get("HomeRegion")
+        if trail_is_multi_region is True:
+            trail_scope = "multi-region"
+        elif trail_is_multi_region is False:
+            trail_scope = "regional"
+        else:
+            trail_scope = "unknown"
+        if trail_scope != "unknown" and isinstance(home_region, str) and home_region:
+            trail_scope += f" (home region: {home_region})"
+
+        for key, field_label in (
+            ("LogFileValidationEnabled", "log file validation"),
         ):
             value = trail.get(key)
             if value is True:
@@ -527,10 +694,10 @@ def audit_cloudtrail_region(cloudtrail_client, region):
             if value is False:
                 findings.append(_add_context({
                     "service": "CloudTrail",
-                    "severity": severity,
+                    "severity": "Medium",
                     "finding": f"CloudTrail {field_label} is not enabled",
                     "recommendation": f"Review and enable {field_label} where required.",
-                }, region=region, resource=trail_label))
+                }, region=region, resource=trail_label, trail_scope=trail_scope))
             else:
                 findings.append(_unverified(
                     "CloudTrail", "DescribeTrails", f"AWS did not return a valid {field_label} value.", trail_label, region
@@ -542,6 +709,8 @@ def audit_cloudtrail_region(cloudtrail_client, region):
             ))
             continue
         try:
+            # GetTrailStatus is regional. The ARN identifies a shadow trail;
+            # querying this region's endpoint checks logging status here.
             status = cloudtrail_client.get_trail_status(Name=name)
         except (ClientError, BotoCoreError) as error:
             findings.append(_operation_error("CloudTrail", "GetTrailStatus", error, trail_label, region))
@@ -556,7 +725,27 @@ def audit_cloudtrail_region(cloudtrail_client, region):
                 "severity": "High",
                 "finding": "CloudTrail trail is not currently logging",
                 "recommendation": "Review trail status and restore logging through an approved change process.",
-            }, region=region, resource=trail_label))
+            }, region=region, resource=trail_label, trail_scope=trail_scope))
+
+    if not has_multi_region_coverage:
+        if multi_region_status_known:
+            findings.append(_add_context({
+                "service": "CloudTrail",
+                "severity": "Medium",
+                "finding": f"No multi-region CloudTrail trail was returned for {region}",
+                "recommendation": (
+                    "The returned trails are regional and do not by themselves establish coverage "
+                    "in other regions. A successful scan confirms only the selected region; assess "
+                    "other enabled regions and organization-level coverage separately."
+                ),
+            }, region=region, coverage_scope="selected region only"))
+        elif not any(
+            finding.get("operation") == "DescribeTrails" and finding.get("severity") == "Unknown"
+            for finding in findings
+        ):
+            findings.append(_unverified(
+                "CloudTrail", "DescribeTrails", "Multi-region trail coverage could not be determined from the returned trail data.", region=region
+            ))
 
     if not findings:
         findings.append({
