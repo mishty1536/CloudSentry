@@ -368,6 +368,32 @@ Attach a least-privilege policy like the following to the identity used by Boto3
 }
 ```
 
+### Optional S3 SSE-S3 Remediation Permission
+
+Scanning remains read-only. The optional remediation UI is hidden unless all three settings below are explicitly configured. This workflow is restricted in code to the configured dedicated test bucket and hard-denies `cloudsentry-test-mishty-2026`:
+
+```bash
+export CLOUDSENTRY_ENABLE_S3_REMEDIATION=true
+export CLOUDSENTRY_S3_REMEDIATION_BUCKET=your-dedicated-test-bucket
+export CLOUDSENTRY_S3_REMEDIATION_REGION=ap-southeast-2
+```
+
+The region must match the dedicated bucket's region and the AWS region selected in the UI. The user must type the exact configured bucket name and click **Apply SSE-S3 encryption to dedicated test bucket**. Only then does CloudSentry call `PutBucketEncryption`, followed by `GetBucketEncryption` to verify AES256. The action does not run during a scan. It does not replace an existing non-AES256 configuration, and success is reported only after AWS confirms AES256.
+
+If an administrator separately approves remediation, add only this additional permission to the dedicated test role or identity; do not add it to the existing read-only role unless that change is explicitly approved. Scope the resource to the one dedicated bucket ARN:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "s3:PutEncryptionConfiguration",
+  "Resource": "arn:aws:s3:::your-dedicated-test-bucket"
+}
+```
+
+`GetBucketEncryption` uses the existing `s3:GetEncryptionConfiguration` permission. The permission name for general purpose buckets is `s3:PutEncryptionConfiguration`; directory buckets use separate S3 Express permissions and are not supported by this workflow. See [AWS PutBucketEncryption permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketEncryption.html).
+
+An absent explicit bucket encryption configuration is reported as unverified by the scanner, not as proof that objects are unencrypted. Amazon S3 automatically encrypts new object uploads by default; this workflow configures an explicit bucket default and does not re-encrypt existing objects.
+
 The policy grants read-only access to the listed configuration APIs. It does not grant permission to create, update, or delete AWS resources.
 
 If a required read permission is missing, throttled, or unavailable, the affected check is reported as **Unknown / unverified**.

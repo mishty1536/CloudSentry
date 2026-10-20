@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, Mock
 from streamlit.testing.v1 import AppTest
+from botocore.exceptions import ClientError
 
 from scan_history import ScanHistoryStore
 
@@ -232,6 +233,73 @@ class AppIntegrationTests(unittest.TestCase):
         self.assertEqual(
             ScanHistoryStore(os.environ["CLOUDSENTRY_HISTORY_DB"]).list_scans(), []
         )
+
+    def test_s3_remediation_requires_exact_confirmation_and_explicit_click(self):
+        remediation_env = patch.dict(os.environ, {
+            "CLOUDSENTRY_ENABLE_AWS_SCAN": "true",
+            "CLOUDSENTRY_ENABLE_S3_REMEDIATION": "true",
+            "CLOUDSENTRY_S3_REMEDIATION_BUCKET": "cloudsentry-remediation-test-2026",
+            "CLOUDSENTRY_S3_REMEDIATION_REGION": "us-east-1",
+        })
+        remediation_env.start()
+        self.addCleanup(remediation_env.stop)
+
+        s3 = Mock()
+        s3.get_bucket_encryption.side_effect = [
+            ClientError(
+                {"Error": {
+                    "Code": "ServerSideEncryptionConfigurationNotFoundError",
+                    "Message": "mocked missing configuration",
+                }},
+                "GetBucketEncryption",
+            ),
+            {"ServerSideEncryptionConfiguration": {"Rules": [{
+                "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}
+            }]}},
+        ]
+
+        with patch("aws_auditor.create_aws_clients_with_session", return_value=(
+            Mock(), (s3, Mock(), Mock())
+        )) as create_clients:
+            at = AppTest.from_file(self.app_path, default_timeout=15)
+            at.run()
+            self.assertFalse(at.exception)
+
+            self._get_operating_mode_radio(at).set_value("AWS (read-only)").run()
+            self.assertFalse(at.exception)
+            create_clients.assert_not_called()
+
+            confirmation = [
+                widget for widget in at.text_input
+                if widget.key == "s3_remediation_confirmation"
+            ]
+            self.assertEqual(len(confirmation), 1)
+            confirmation[0].set_value("wrong-bucket").run()
+            self.assertFalse(at.exception)
+            create_clients.assert_not_called()
+
+            remediation_button = [
+                button for button in at.button if button.key == "s3_remediation_submit"
+            ]
+            self.assertEqual(len(remediation_button), 1)
+            remediation_button[0].click().run()
+            self.assertFalse(at.exception)
+            create_clients.assert_not_called()
+
+            confirmation = [
+                widget for widget in at.text_input
+                if widget.key == "s3_remediation_confirmation"
+            ][0]
+            confirmation.set_value("cloudsentry-remediation-test-2026").run()
+            create_clients.assert_not_called()
+
+            remediation_button = [
+                button for button in at.button if button.key == "s3_remediation_submit"
+            ][0]
+            remediation_button.click().run()
+            self.assertFalse(at.exception)
+            create_clients.assert_called_once()
+            s3.put_bucket_encryption.assert_called_once()
 
     def test_aws_auditor_failure_logs_audit_phase_without_exception_text(self):
         aws_enabled = patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "true"})
