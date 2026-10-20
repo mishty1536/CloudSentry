@@ -52,8 +52,8 @@ The application is available while the EC2 instance and Streamlit process are ru
   - Aggregates findings into standard severity classifications (`High`, `Medium`, `Low`, `Unknown`, `Info`).
   - Computes a normalized 0–100 risk score based on average finding severity, paired with qualitative posture classifications (`Low Risk`, `Moderate Risk`, `High Risk`).
 - **Scan Comparison (Before vs. After):**
-  - Retains scan history within the user session.
-  - Calculates numerical deltas across scan iterations to visualize posture improvement or security drift following remediation.
+  - Persists completed scan snapshots in a local SQLite database across sessions and application restarts.
+  - Compares arbitrary compatible scans by finding identity, severity counts, and risk score; incomplete scans never turn absent findings into resolved findings.
 - **Executive & Technical PDF Report Export:**
   - Generates downloadable, styled PDF reports on-demand directly from the dashboard using ReportLab.
   - Exports both full **Security Audit Reports** (detailed findings table with multi-page support) and **Security Summary Reports** (high-level executive metrics).
@@ -434,13 +434,58 @@ Findings are based on the configuration information available to the application
 
 The tool should be used as an aid to security review, with results verified against AWS configuration and organizational security requirements.
 
+## Persistent Scan History
+
+Completed Demo and AWS scans are stored locally in SQLite. The default path is outside the repository:
+
+- Linux: `$XDG_DATA_HOME/cloudsentry/scan_history.db` when `XDG_DATA_HOME` is set; otherwise `~/.local/share/cloudsentry/scan_history.db`
+- Windows: `%LOCALAPPDATA%\CloudSentry\scan_history.db`
+
+Set `CLOUDSENTRY_HISTORY_DB` to override the location. On the EC2 deployment, the default is under the service user's home directory (for example, `/home/ec2-user/.local/share/cloudsentry/scan_history.db`). If using `/var/lib/cloudsentry/scan_history.db`, create that directory with ownership for the service user before starting the application:
+
+```bash
+sudo install -d -o ec2-user -g ec2-user -m 700 /var/lib/cloudsentry
+```
+
+SQLite transactions and a busy timeout protect concurrent reads and writes. Findings, severity counts, risk score, scan mode, region, assessment status, and CloudTrail account-coverage metadata are stored. Incomplete scans remain marked **Incomplete**; failed scans are not saved. Comparisons require the same mode and, for AWS, the same region. Missing findings from incomplete scans are treated as unverified rather than resolved.
+
+History survives browser sessions, Streamlit reruns, and service restarts while the database remains on persistent host storage. It is not replicated to another EC2 instance and is not protected from loss of the host's storage. The database is local to this application host. Keep the file and its directory protected: AWS findings may contain account resource identifiers. All visitors who can reach this unauthenticated app can see the shared history for the selected mode; do not expose AWS history publicly.
+
+Back up a live database consistently with Python's SQLite backup API (replace the source path if `CLOUDSENTRY_HISTORY_DB` is set):
+
+```bash
+source_path="$HOME/.local/share/cloudsentry/scan_history.db"
+backup_path="$HOME/cloudsentry-scan-history-$(date -u +%Y%m%dT%H%M%SZ).db"
+python3.11 - "$source_path" "$backup_path" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as backup:
+    source.backup(backup)
+PY
+chmod 600 "$backup_path"
+```
+
+For the EC2 default path, restore a verified backup with:
+
+```bash
+database_path="$HOME/.local/share/cloudsentry/scan_history.db"
+restore_path="$HOME/cloudsentry-scan-history-YYYYMMDDTHHMMSSZ.db"
+sudo systemctl stop cloudsentry.service
+cp -- "$restore_path" "$database_path"
+chmod 600 "$database_path"
+sudo chown ec2-user:ec2-user "$database_path"
+sudo systemctl start cloudsentry.service
+```
+
+Use the configured path and service account if they differ. Keep a separate copy of the current database until the restored history has been verified.
+
 ## Future Improvements
 
 Potential future enhancements include:
 
 - Authentication and role-based access control.
 - HTTPS and a custom domain for public deployments.
-- Persistent scan history and report storage.
 - Multi-region CloudTrail assessment.
 - Broader S3 effective-public-access analysis.
 - Expanded IAM policy evaluation and contextual findings.
