@@ -1,23 +1,14 @@
-import html
 import inspect
-import io
 import logging
 import math
 import os
 import re
 import traceback
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from botocore.exceptions import BotoCoreError, ClientError
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, landscape
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-
 from s3_auditor import audit_s3_configuration
 from iam_auditor import audit_iam_policy
 from cloudTrail_auditor import audit_cloudtrail_configuration
@@ -36,6 +27,7 @@ from scan_history import (
     compare_scans,
     scan_assessment_status,
 )
+from pdf_reports import generate_pdf_report
 
 aws_scan_logger = logging.getLogger("cloudsentry.aws_scan")
 
@@ -192,133 +184,6 @@ REMEDIATION_STEPS = {
         "Monitor logging status and retention.",
     ],
 }
-
-
-PDF_COLUMN_WEIGHTS = {
-    "service": 1.0,
-    "severity": 1.0,
-    "region": 1.0,
-    "resource": 2.0,
-    "finding": 3.5,
-    "recommendation": 3.5,
-    "policy_name": 1.8,
-    "policy_type": 1.2,
-    "attached_to": 1.5,
-    "metric": 2.0,
-    "value": 2.5,
-}
-
-
-def generate_pdf_report(title, df, subtitle=None, landscape_mode=True):
-    """Generate a formatted PDF report from a pandas DataFrame."""
-    buffer = io.BytesIO()
-    pagesize = landscape(letter) if landscape_mode else letter
-    margin = 30 if landscape_mode else 36
-
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=pagesize,
-        rightMargin=margin,
-        leftMargin=margin,
-        topMargin=margin,
-        bottomMargin=margin + 15,
-    )
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "ReportTitle",
-        parent=styles["Heading1"],
-        fontName="Helvetica-Bold",
-        fontSize=16,
-        leading=20,
-        textColor=colors.HexColor("#0E1728"),
-    )
-    subtitle_style = ParagraphStyle(
-        "ReportSubtitle",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=9,
-        leading=12,
-        textColor=colors.HexColor("#64748B"),
-    )
-    header_cell_style = ParagraphStyle(
-        "HeaderCell",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=8,
-        leading=10,
-        textColor=colors.white,
-    )
-    body_cell_style = ParagraphStyle(
-        "BodyCell",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8,
-        leading=10,
-        textColor=colors.HexColor("#1E293B"),
-    )
-
-    story = []
-    story.append(Paragraph(html.escape(title), title_style))
-    story.append(Spacer(1, 4))
-
-    meta_parts = []
-    if subtitle:
-        meta_parts.append(subtitle)
-    meta_parts.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    story.append(Paragraph(html.escape(" | ".join(meta_parts)), subtitle_style))
-    story.append(Spacer(1, 14))
-
-    if df is None or df.empty:
-        story.append(Paragraph("No records found.", body_cell_style))
-    else:
-        headers = [
-            Paragraph(f"<b>{html.escape(str(col).replace('_', ' ').title())}</b>", header_cell_style)
-            for col in df.columns
-        ]
-        data = [headers]
-
-        for _, row in df.iterrows():
-            row_cells = []
-            for col in df.columns:
-                val = row[col]
-                text = "" if pd.isna(val) else str(val)
-                row_cells.append(Paragraph(html.escape(text), body_cell_style))
-            data.append(row_cells)
-
-        usable_width = pagesize[0] - (2 * margin)
-        weights = [PDF_COLUMN_WEIGHTS.get(str(col).lower(), 1.5) for col in df.columns]
-        total_weight = sum(weights)
-        col_widths = [(w / total_weight) * usable_width for w in weights] if total_weight > 0 else None
-
-        table = Table(data, colWidths=col_widths, repeatRows=1)
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1B3150")),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 5),
-            ('TOPPADDING', (0, 0), (-1, 0), 5),
-            ('LEFTPADDING', (0, 0), (-1, -1), 4),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
-            ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
-            ('TOPPADDING', (0, 1), (-1, -1), 4),
-        ]))
-        story.append(table)
-
-    def _draw_page_decorations(canvas, doc_obj):
-        canvas.saveState()
-        canvas.setFont('Helvetica', 8)
-        canvas.setFillColor(colors.HexColor("#64748B"))
-        canvas.drawString(margin, 15, "CloudSentry | Cloud Security Misconfiguration Auditor")
-        page_num = canvas.getPageNumber()
-        canvas.drawRightString(pagesize[0] - margin, 15, f"Page {page_num}")
-        canvas.restoreState()
-
-    doc.build(story, onFirstPage=_draw_page_decorations, onLaterPages=_draw_page_decorations)
-    return buffer.getvalue()
-
 
 
 def stretch_kwargs(widget):
@@ -1218,11 +1083,42 @@ st.header("Export Security Report")
 report_df = findings_df.copy()
 
 if not report_df.empty:
+    report_region = st.session_state.get("scan_region") or "Demo"
+    report_notes = [f"Assessment status: {current_assessment_status}."]
+    if operating_mode == "AWS (read-only)":
+        report_notes.append(f"Selected AWS region: {report_region}.")
+        if isinstance(account_coverage, dict):
+            coverage_status = account_coverage.get("coverage_status", "unknown")
+            report_notes.append(f"Account-wide CloudTrail coverage status: {coverage_status}.")
+            for label, key in (
+                ("Covered regions", "covered_regions"),
+                ("Uncovered regions", "uncovered_regions"),
+                ("Unverified regions", "unverified_region_names"),
+                ("Regions not enabled", "not_enabled_regions"),
+            ):
+                regions = account_coverage.get(key) or []
+                if regions:
+                    names = [
+                        str(item.get("region", item)) if isinstance(item, dict) else str(item)
+                        for item in regions
+                    ]
+                    report_notes.append(f"{label}: {', '.join(names)}.")
+        else:
+            report_notes.append(
+                "Account-wide CloudTrail coverage metadata is unavailable; coverage is unverified."
+            )
+    else:
+        report_notes.append("Demo results use sample configurations; no AWS account was inspected.")
+
     pdf_data = generate_pdf_report(
         "CloudSentry Security Audit Report",
         report_df,
-        subtitle=f"Mode: {operating_mode} | Total Findings: {len(report_df)}",
+        subtitle=(
+            f"Mode: {operating_mode} | Region: {report_region} | "
+            f"Total Findings: {len(report_df)}"
+        ),
         landscape_mode=True,
+        notes=report_notes,
     )
 
     st.download_button(
@@ -1256,6 +1152,7 @@ if not report_df.empty:
         summary_report,
         subtitle=f"Mode: {operating_mode} | Scan #{st.session_state['scan_number']}",
         landscape_mode=False,
+        notes=report_notes,
     )
 
     st.download_button(
