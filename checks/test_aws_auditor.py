@@ -106,7 +106,13 @@ class AuditS3AccountTests(unittest.TestCase):
         findings = audit_s3_account(s3)
 
         self.assertTrue(any(f["severity"] == "High" for f in findings))
-        self.assertTrue(any(f["severity"] == "Unknown" for f in findings))
+        missing_encryption = [
+            finding for finding in findings
+            if finding.get("operation") == "GetBucketEncryption"
+        ]
+        self.assertEqual(len(missing_encryption), 1)
+        self.assertEqual(missing_encryption[0]["severity"], "Unknown")
+        self.assertIn("automatic encryption", missing_encryption[0]["recommendation"])
 
     def test_access_denied_is_unverified(self):
         s3 = Mock()

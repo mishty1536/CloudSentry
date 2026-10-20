@@ -28,6 +28,7 @@ from scan_history import (
     scan_assessment_status,
 )
 from pdf_reports import generate_pdf_report
+from s3_remediation import PROTECTED_BUCKET_NAME, remediate_s3_default_encryption
 
 aws_scan_logger = logging.getLogger("cloudsentry.aws_scan")
 
@@ -130,6 +131,11 @@ st.write(
 aws_scan_enabled = os.environ.get("CLOUDSENTRY_ENABLE_AWS_SCAN", "").strip().lower() in {
     "1", "true", "yes"
 }
+s3_remediation_enabled = os.environ.get(
+    "CLOUDSENTRY_ENABLE_S3_REMEDIATION", ""
+).strip().lower() in {"1", "true", "yes"}
+s3_remediation_bucket = os.environ.get("CLOUDSENTRY_S3_REMEDIATION_BUCKET", "").strip()
+s3_remediation_region = os.environ.get("CLOUDSENTRY_S3_REMEDIATION_REGION", "").strip()
 mode_options = ["Demo", "AWS (read-only)"] if aws_scan_enabled else ["Demo"]
 if st.session_state.get("operating_mode") not in mode_options:
     st.session_state["operating_mode"] = "Demo"
@@ -153,6 +159,9 @@ else:
         "Credentials can come from an attached EC2 IAM Role, local AWS profile, "
         "environment variables, or optional credentials."
     )
+
+remediation_clicked = False
+remediation_confirmation = ""
 
 
 # ============================================================
@@ -621,10 +630,75 @@ else:
     if selected_region:
         st.session_state["aws_region"] = selected_region
 
+    if s3_remediation_enabled:
+        st.divider()
+        st.subheader("Optional S3 default-encryption remediation")
+        st.warning(
+            "This action writes a bucket encryption configuration. It is never run during a scan. "
+            "Only the separately configured dedicated test bucket is eligible."
+        )
+        if not s3_remediation_bucket:
+            st.info("Remediation is unavailable until a dedicated test bucket is configured.")
+        elif s3_remediation_bucket == PROTECTED_BUCKET_NAME:
+            st.error("Remediation is hard-disabled for the protected CloudSentry test bucket.")
+        elif not s3_remediation_region:
+            st.info("Remediation is unavailable until the dedicated bucket's AWS region is configured.")
+        else:
+            st.caption(
+                f"Configured dedicated bucket: {s3_remediation_bucket} "
+                f"(region {s3_remediation_region})."
+            )
+            remediation_confirmation = st.text_input(
+                f"Type {s3_remediation_bucket} to confirm",
+                key="s3_remediation_confirmation",
+            )
+            if selected_region != s3_remediation_region:
+                st.warning(
+                    "Select the configured test bucket region before the remediation action is available."
+                )
+            remediation_clicked = st.button(
+                "Apply SSE-S3 encryption to dedicated test bucket",
+                type="secondary",
+                key="s3_remediation_submit",
+                disabled=selected_region != s3_remediation_region,
+                **stretch_kwargs(st.button),
+            )
+
 
 # ============================================================
 # EXECUTE SCAN AND STORE RESULTS
 # ============================================================
+
+if remediation_clicked:
+    if remediation_confirmation != s3_remediation_bucket:
+        st.error("Bucket name confirmation did not match exactly. No AWS client was created.")
+    elif s3_remediation_bucket == PROTECTED_BUCKET_NAME:
+        st.error("Remediation is blocked for the protected CloudSentry test bucket.")
+    elif selected_region != s3_remediation_region:
+        st.error("The selected AWS region does not match the configured test bucket region.")
+    else:
+        try:
+            with st.spinner("Checking and applying S3 SSE-S3 only for the confirmed test bucket..."):
+                _, (s3_client, _, _) = create_aws_clients_with_session(
+                    selected_region,
+                    aws_access_key_id=aws_access_key or None,
+                    aws_secret_access_key=aws_secret_key or None,
+                    aws_session_token=aws_session_token or None,
+                )
+                remediation_result = remediate_s3_default_encryption(
+                    s3_client,
+                    remediation_confirmation,
+                    allowed_bucket_name=s3_remediation_bucket,
+                )
+            if remediation_result["success"]:
+                st.success(remediation_result["message"])
+            else:
+                st.error(remediation_result["message"])
+        except (BotoCoreError, ClientError, ValueError) as error:
+            st.error(
+                f"S3 remediation could not be completed ({type(error).__name__}). "
+                "No success is reported. Check service logs; credentials are not displayed."
+            )
 
 if scan_clicked:
     new_results = None
