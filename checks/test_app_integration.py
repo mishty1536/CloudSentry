@@ -1,13 +1,26 @@
 import os
+import tempfile
 import unittest
 from unittest.mock import patch, Mock
 from streamlit.testing.v1 import AppTest
+
+from scan_history import ScanHistoryStore
 
 
 class AppIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app.py"))
+
+    def setUp(self):
+        self.history_directory = tempfile.TemporaryDirectory()
+        history_env = patch.dict(
+            os.environ,
+            {"CLOUDSENTRY_HISTORY_DB": os.path.join(self.history_directory.name, "history.db")},
+        )
+        history_env.start()
+        self.addCleanup(history_env.stop)
+        self.addCleanup(self.history_directory.cleanup)
 
     def _get_operating_mode_radio(self, at):
         radios = [r for r in at.sidebar.radio if r.key == "operating_mode"]
@@ -68,6 +81,25 @@ class AppIntegrationTests(unittest.TestCase):
         download_labels = self._get_download_button_labels(at)
         self.assertIn("Download Audit Report (PDF)", download_labels)
         self.assertIn("Download Security Summary (PDF)", download_labels)
+
+    def test_scan_history_survives_a_new_app_session(self):
+        with patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "0"}):
+            first_session = AppTest.from_file(self.app_path, default_timeout=15).run()
+            self.assertFalse(first_session.exception)
+            self._get_button_by_label(first_session, "Scan Configuration").click().run()
+            self.assertFalse(first_session.exception)
+
+            second_session = AppTest.from_file(self.app_path, default_timeout=15).run()
+            self.assertTrue(second_session.dataframe)
+            self._get_button_by_label(second_session, "Scan Configuration").click().run()
+            self.assertFalse(second_session.exception)
+            third_session = AppTest.from_file(self.app_path, default_timeout=15).run()
+
+        self.assertFalse(third_session.exception)
+        self.assertTrue(any(header.value == "Scan History" for header in third_session.header))
+        self.assertGreaterEqual(len(third_session.dataframe), 1)
+        self.assertIn("Before scan", [item.label for item in third_session.selectbox])
+        self.assertIn("After scan", [item.label for item in third_session.selectbox])
 
     def test_aws_scan_with_mocked_clients_and_pagination(self):
         aws_enabled = patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "true"})
@@ -149,6 +181,11 @@ class AppIntegrationTests(unittest.TestCase):
             metrics = {m.label: m.value for m in at.metric}
             self.assertEqual(metrics.get("Total Findings"), "52")
             self.assertEqual(metrics.get("High Severity"), "2")
+            saved_aws_scans = ScanHistoryStore(os.environ["CLOUDSENTRY_HISTORY_DB"]).list_scans(
+                mode="AWS"
+            )
+            self.assertEqual(len(saved_aws_scans), 1)
+            self.assertEqual(saved_aws_scans[0]["assessment_status"], "Incomplete")
 
             # Check that pagination selector is rendered with 6 pages (52 items / 10 per page)
             page_selectors = [number for number in at.number_input if number.key == "rec_page_All_10"]
@@ -192,6 +229,9 @@ class AppIntegrationTests(unittest.TestCase):
         self.assertIn("exception_type=TypeError", diagnostic)
         self.assertIn("app.py", diagnostic)
         self.assertNotIn(secret_sentinel, diagnostic)
+        self.assertEqual(
+            ScanHistoryStore(os.environ["CLOUDSENTRY_HISTORY_DB"]).list_scans(), []
+        )
 
     def test_aws_auditor_failure_logs_audit_phase_without_exception_text(self):
         aws_enabled = patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "true"})

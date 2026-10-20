@@ -1,0 +1,265 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from scan_history import (
+    ScanHistoryError,
+    ScanHistoryStore,
+    compare_scans,
+    default_database_path,
+    scan_assessment_status,
+)
+
+
+def finding(severity, title, resource, recommendation="Review the resource."):
+    return {
+        "service": "S3",
+        "severity": severity,
+        "finding": title,
+        "resource": resource,
+        "recommendation": recommendation,
+        "custom_context": {"retained": True},
+    }
+
+
+class ScanHistoryStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "history" / "scan_history.db"
+        self.store = ScanHistoryStore(self.database_path)
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def save(self, mode="Demo", region=None, findings=None, risk=0, status=None, coverage=None, scanned_at=None):
+        return self.store.save_scan(
+            mode=mode,
+            region=region,
+            findings=findings or [],
+            risk_score=risk,
+            assessment_status=status,
+            coverage=coverage,
+            scanned_at=scanned_at,
+        )
+
+    def test_initialization_creates_database_outside_source_by_default(self):
+        with patch.dict(os.environ, {"CLOUDSENTRY_HISTORY_DB": str(self.database_path)}):
+            self.assertEqual(default_database_path(), self.database_path)
+        self.assertTrue(self.database_path.is_file())
+
+    def test_save_retrieve_and_reopen_preserves_full_finding_data(self):
+        original = self.save(
+            findings=[finding("High", "Public access enabled", "bucket-a")],
+            risk=80,
+        )
+        reopened = ScanHistoryStore(self.database_path).get_scan(original["scan_id"])
+
+        self.assertEqual(reopened["scan_id"], original["scan_id"])
+        self.assertEqual(reopened["findings"][0]["custom_context"], {"retained": True})
+        self.assertEqual(reopened["severity_counts"]["High"], 1)
+        self.assertEqual(reopened["risk_score"], 80)
+        self.assertEqual(reopened["assessment_status"], "Complete")
+
+    def test_snapshots_have_unique_ids_and_stable_timestamp_order(self):
+        later_timestamp = self.save(scanned_at="2026-01-02T00:00:00+00:00")
+        earlier_timestamp = self.save(scanned_at="2026-01-01T00:00:00+00:00")
+
+        self.assertNotEqual(later_timestamp["scan_id"], earlier_timestamp["scan_id"])
+        self.assertEqual(
+            [x["scan_id"] for x in self.store.list_scans()],
+            [later_timestamp["scan_id"], earlier_timestamp["scan_id"]],
+        )
+        self.assertGreater(earlier_timestamp["scan_number"], later_timestamp["scan_number"])
+
+    def test_duplicate_scan_contents_are_saved_as_distinct_snapshots(self):
+        data = [finding("Info", "Checks passed", "bucket-a")]
+        first = self.save(findings=data, risk=0)
+        second = self.save(findings=data, risk=0)
+
+        self.assertNotEqual(first["scan_id"], second["scan_id"])
+        self.assertEqual(len(self.store.list_scans()), 2)
+
+    def test_demo_and_aws_histories_are_separate(self):
+        demo = self.save(mode="Demo", findings=[finding("High", "Demo issue", "demo")])
+        aws = self.save(mode="AWS (read-only)", region="ap-southeast-2", findings=[])
+
+        self.assertEqual([row["scan_id"] for row in self.store.list_scans(mode="Demo")], [demo["scan_id"]])
+        self.assertEqual([row["scan_id"] for row in self.store.list_scans(mode="AWS")], [aws["scan_id"]])
+        self.assertEqual(self.store.list_scans(mode="AWS", region="us-east-1"), [])
+
+    def test_unknown_findings_and_partial_account_coverage_mark_scan_incomplete(self):
+        unknown = self.save(findings=[finding("Unknown", "Check unavailable", "bucket-a")])
+        partial = self.save(
+            mode="AWS",
+            region="ap-southeast-2",
+            findings=[],
+            coverage={"coverage_status": "partial", "unverified_regions": [{"region": "us-east-1"}]},
+        )
+
+        self.assertEqual(unknown["assessment_status"], "Incomplete")
+        self.assertEqual(partial["assessment_status"], "Incomplete")
+        self.assertEqual(partial["coverage"]["unverified_regions"][0]["region"], "us-east-1")
+        self.assertEqual(scan_assessment_status([], {"coverage_status": "unknown"}), "Incomplete")
+        self.assertEqual(scan_assessment_status([], None, mode="AWS"), "Incomplete")
+        explicit_complete = self.save(
+            mode="AWS", region="us-east-1", findings=[], status="Complete", coverage=None
+        )
+        self.assertEqual(explicit_complete["assessment_status"], "Incomplete")
+
+    def test_failed_scan_is_not_created_by_storage_api(self):
+        self.assertEqual(self.store.list_scans(), [])
+
+    def test_missing_database_is_initialized_and_missing_schema_is_reported(self):
+        fresh_path = Path(self.temporary_directory.name) / "fresh" / "history.db"
+        fresh_store = ScanHistoryStore(fresh_path)
+        self.assertEqual(fresh_store.list_scans(), [])
+
+        uninitialized = ScanHistoryStore.__new__(ScanHistoryStore)
+        uninitialized.path = Path(self.temporary_directory.name) / "uninitialized.db"
+        with self.assertRaises(ScanHistoryError):
+            uninitialized.list_scans()
+
+    def test_sqlite_errors_are_reported_without_raw_database_details(self):
+        with patch("scan_history.sqlite3.connect", side_effect=sqlite3.OperationalError("locked")):
+            with self.assertRaisesRegex(ScanHistoryError, "Could not initialize"):
+                ScanHistoryStore(Path(self.temporary_directory.name) / "locked.db")
+
+    def test_concurrent_writes_are_transactional(self):
+        def write(index):
+            return self.store.save_scan(
+                mode="Demo",
+                region=None,
+                findings=[finding("Low", f"Finding {index}", f"resource-{index}")],
+                risk_score=20,
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            records = list(executor.map(write, range(20)))
+
+        summaries = self.store.list_scans(mode="Demo")
+        self.assertEqual(len(records), 20)
+        self.assertEqual(len(summaries), 20)
+        self.assertEqual(len({item["scan_id"] for item in summaries}), 20)
+
+    def test_concurrent_store_initialization_uses_one_schema_safely(self):
+        shared_path = Path(self.temporary_directory.name) / "shared" / "concurrent.db"
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            stores = list(executor.map(lambda _: ScanHistoryStore(shared_path), range(6)))
+
+        self.assertEqual(len(stores[0].list_scans()), 0)
+        saved = stores[0].save_scan(mode="Demo", region=None, findings=[], risk_score=0)
+        self.assertEqual(stores[-1].get_scan(saved["scan_id"])["scan_id"], saved["scan_id"])
+
+
+class ScanComparisonTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.store = ScanHistoryStore(Path(self.temporary_directory.name) / "history.db")
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def save(self, findings, risk, status="Complete", mode="Demo", region=None, coverage=None):
+        return self.store.save_scan(
+            mode=mode,
+            region=region,
+            findings=findings,
+            risk_score=risk,
+            assessment_status=status,
+            coverage=coverage,
+        )
+
+    def test_comparison_classifies_resolved_remaining_and_new_findings(self):
+        before = self.save([
+            finding("High", "Public access", "bucket-a"),
+            finding("Medium", "No encryption", "bucket-b"),
+        ], 75)
+        after = self.save([
+            finding("High", "Public access", "bucket-a", "Restrict access."),
+            finding("Low", "Logging disabled", "bucket-c"),
+        ], 40)
+
+        result = compare_scans(before, after)
+        self.assertEqual([x["resource"] for x in result["resolved"]], ["bucket-b"])
+        self.assertEqual([x["resource"] for x in result["remaining"]], ["bucket-a"])
+        self.assertEqual([x["resource"] for x in result["newly_detected"]], ["bucket-c"])
+
+    def test_arbitrary_saved_snapshots_can_be_compared(self):
+        oldest = self.save([finding("High", "Issue", "a")], 100)
+        middle = self.save([finding("Medium", "Issue", "b")], 50)
+        latest = self.save([finding("Low", "Issue", "c")], 20)
+
+        result = compare_scans(self.store.get_scan(oldest["scan_id"]), self.store.get_scan(latest["scan_id"]))
+        self.assertEqual(result["before_total"], 1)
+        self.assertEqual(result["after_total"], 1)
+        self.assertEqual(len(result["newly_detected"]), 1)
+        self.assertEqual(middle["scan_number"], 2)
+
+    def test_severity_and_risk_score_comparisons_are_returned(self):
+        before = self.save([finding("High", "Issue", "a"), finding("Info", "OK", "b")], 50)
+        after = self.save([finding("Low", "Issue", "a"), finding("Medium", "Other", "c")], 35)
+
+        result = compare_scans(before, after)
+        self.assertEqual(result["severity"]["High"], {"before": 1, "after": 0, "delta": -1})
+        self.assertEqual(result["severity"]["Info"], {"before": 1, "after": 0, "delta": -1})
+        self.assertEqual(result["risk_score_delta"], -15)
+
+    def test_incomplete_after_scan_does_not_mark_absent_findings_resolved(self):
+        before = self.save([finding("High", "Issue", "a")], 100)
+        after = self.save([], 0, status="Incomplete")
+
+        result = compare_scans(before, after)
+        self.assertEqual(result["resolved"], [])
+        self.assertEqual(result["unverified_before"][0]["resource"], "a")
+
+    def test_incomplete_before_scan_does_not_claim_unmatched_findings_are_new(self):
+        before = self.save([], 0, status="Incomplete")
+        after = self.save([finding("High", "Issue", "a")], 100)
+
+        result = compare_scans(before, after)
+        self.assertEqual(result["newly_detected"], [])
+        self.assertEqual(result["unverified_after"][0]["resource"], "a")
+
+    def test_unknown_findings_are_never_claimed_resolved(self):
+        before = self.save([finding("Unknown", "Check unavailable", "a")], 0, status="Incomplete")
+        after = self.save([], 0, status="Complete")
+
+        result = compare_scans(before, after)
+        self.assertEqual(result["resolved"], [])
+        self.assertEqual(len(result["unverified_before"]), 1)
+
+    def test_identical_scans_are_detected_independent_of_finding_order(self):
+        first = self.save(
+            [finding("High", "Issue A", "a"), finding("Low", "Issue B", "b")],
+            60,
+            mode="AWS",
+            region="ap-southeast-2",
+            coverage={"coverage_status": "complete", "covered_regions": ["ap-southeast-2", "us-east-1"]},
+        )
+        second = self.save(
+            [finding("Low", "Issue B", "b"), finding("High", "Issue A", "a")],
+            60,
+            mode="AWS",
+            region="ap-southeast-2",
+            coverage={"coverage_status": "complete", "covered_regions": ["us-east-1", "ap-southeast-2"]},
+        )
+
+        self.assertTrue(compare_scans(first, second)["identical"])
+
+    def test_demo_aws_and_cross_region_comparisons_are_rejected(self):
+        demo = self.save([], 0)
+        aws = self.save([], 0, mode="AWS", region="ap-southeast-2")
+        other_region = self.save([], 0, mode="AWS", region="us-east-1")
+
+        with self.assertRaises(ValueError):
+            compare_scans(demo, aws)
+        with self.assertRaises(ValueError):
+            compare_scans(aws, other_region)
+
+
+if __name__ == "__main__":
+    unittest.main()

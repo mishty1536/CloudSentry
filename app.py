@@ -23,13 +23,18 @@ from iam_auditor import audit_iam_policy
 from cloudTrail_auditor import audit_cloudtrail_configuration
 from aws_auditor import audit_aws_account, create_aws_clients_with_session
 from dashboard_helpers import (
-    assessment_status,
     calculate_risk_score,
     classify_risk,
     combine_findings,
     count_severity,
     make_findings_dataframe,
     prepare_dataframe_for_display,
+)
+from scan_history import (
+    ScanHistoryError,
+    ScanHistoryStore,
+    compare_scans,
+    scan_assessment_status,
 )
 
 aws_scan_logger = logging.getLogger("cloudsentry.aws_scan")
@@ -426,6 +431,156 @@ def display_dataframe(df, *, hide_index=True):
         st.dataframe(styler, use_container_width=True, hide_index=hide_index)
 
 
+def render_scan_history_section(history_store, operating_mode, selected_region):
+    """Render persisted history and compare only compatible snapshots."""
+    st.divider()
+    st.header("Scan History")
+    if history_store is None:
+        st.warning(
+            "Persistent scan history is unavailable. Completed scans can still be viewed, "
+            "but this run cannot save or compare history."
+        )
+        return []
+
+    history_mode = "AWS" if operating_mode == "AWS (read-only)" else "Demo"
+    try:
+        summaries = history_store.list_scans(mode=history_mode)
+    except ScanHistoryError as error:
+        st.warning(
+            f"Persistent scan history could not be read ({type(error).__name__}). "
+            "Current scan results remain available."
+        )
+        return []
+
+    if history_mode == "AWS":
+        regions = sorted({item["region"] for item in summaries if item.get("region")})
+        if not regions:
+            st.info("No saved AWS scans are available yet.")
+            return []
+        region_key = "history_region_filter_aws"
+        if st.session_state.get(region_key) not in regions:
+            st.session_state[region_key] = (
+                selected_region if selected_region in regions else summaries[0]["region"]
+            )
+        chosen_region = st.selectbox("AWS history region", regions, key=region_key)
+        summaries = [item for item in summaries if item.get("region") == chosen_region]
+
+    if not summaries:
+        st.info(f"No saved {history_mode} scans are available yet.")
+        return []
+
+    history_table = [
+        {
+            "Scan": item["scan_number"],
+            "Scan ID": item["scan_id"][:12],
+            "Timestamp (UTC)": item["scanned_at"],
+            "Mode": item["mode"],
+            "Region": item["region"] or "—",
+            "Findings": item["total_findings"],
+            "High": item["severity_counts"].get("High", 0),
+            "Medium": item["severity_counts"].get("Medium", 0),
+            "Low": item["severity_counts"].get("Low", 0),
+            "Info": item["severity_counts"].get("Info", 0),
+            "Unknown": item["severity_counts"].get("Unknown", 0),
+            "Risk Score": item["risk_score"],
+            "Status": item["assessment_status"],
+        }
+        for item in summaries
+    ]
+    st.dataframe(pd.DataFrame(history_table), hide_index=True, **stretch_kwargs(st.dataframe))
+
+    if len(summaries) < 2:
+        st.info("Save at least two compatible scans to compare before and after results.")
+        return summaries
+
+    scan_ids = [item["scan_id"] for item in summaries]
+    labels = {
+        item["scan_id"]: (
+            f"Scan {item['scan_number']} · {item['scanned_at']} · "
+            f"{item['total_findings']} findings · risk {item['risk_score']}"
+        )
+        for item in summaries
+    }
+    after_key = f"history_after_scan_{history_mode.lower()}"
+    before_key = f"history_before_scan_{history_mode.lower()}"
+    if st.session_state.get(after_key) not in scan_ids:
+        st.session_state[after_key] = scan_ids[0]
+    if st.session_state.get(before_key) not in scan_ids:
+        st.session_state[before_key] = scan_ids[1]
+
+    st.subheader("Before-and-after comparison")
+    before_col, after_col = st.columns(2)
+    with before_col:
+        before_id = st.selectbox(
+            "Before scan", scan_ids, format_func=labels.get, key=before_key
+        )
+    with after_col:
+        after_id = st.selectbox(
+            "After scan", scan_ids, format_func=labels.get, key=after_key
+        )
+
+    try:
+        before = history_store.get_scan(before_id)
+        after = history_store.get_scan(after_id)
+        if before is None or after is None:
+            st.warning("A selected scan is no longer available in persistent history.")
+            return summaries
+        comparison = compare_scans(before, after)
+    except (ScanHistoryError, ValueError) as error:
+        st.warning(f"These scans cannot be compared ({type(error).__name__}).")
+        return summaries
+
+    if comparison["identical"]:
+        st.info("The selected scans are identical in findings, severity counts, score, and coverage.")
+    if not comparison["before_complete"] or not comparison["after_complete"]:
+        st.warning(
+            "At least one assessment is incomplete. Findings absent from an incomplete scan "
+            "are unverified and are not counted as resolved or newly detected."
+        )
+
+    score_rows = [
+        {
+            "Measure": "Total findings",
+            "Before": comparison["before_total"],
+            "After": comparison["after_total"],
+        },
+        *[
+            {"Measure": severity, **values}
+            for severity, values in comparison["severity"].items()
+        ],
+        {
+            "Measure": "Risk score",
+            "Before": comparison["before_risk_score"],
+            "After": comparison["after_risk_score"],
+        },
+    ]
+    st.dataframe(pd.DataFrame(score_rows), hide_index=True, **stretch_kwargs(st.dataframe))
+    st.caption(
+        f"Resolved: {len(comparison['resolved'])} · Remaining: {len(comparison['remaining'])} · "
+        f"Newly detected: {len(comparison['newly_detected'])}"
+    )
+    if comparison["unverified_before"] or comparison["unverified_after"]:
+        st.caption(
+            "Unverified comparison records: "
+            f"{len(comparison['unverified_before'])} before, "
+            f"{len(comparison['unverified_after'])} after."
+        )
+    for label, key in (
+        ("Resolved findings", "resolved"),
+        ("Remaining findings", "remaining"),
+        ("Newly detected findings", "newly_detected"),
+    ):
+        records = comparison[key]
+        with st.expander(f"{label} ({len(records)})"):
+            if records:
+                st.dataframe(
+                    pd.DataFrame(records), hide_index=True, **stretch_kwargs(st.dataframe)
+                )
+            else:
+                st.caption("None")
+    return summaries
+
+
 def run_audit(
     block_public_acls,
     ignore_public_acls,
@@ -484,14 +639,16 @@ def run_audit(
 if "scan_results" not in st.session_state:
     st.session_state["scan_results"] = None
 
-if "scan_history" not in st.session_state:
-    st.session_state["scan_history"] = []
-
-if "previous_scan_results" not in st.session_state:
-    st.session_state["previous_scan_results"] = None
-
 if "scan_number" not in st.session_state:
     st.session_state["scan_number"] = 0
+
+try:
+    history_store = ScanHistoryStore()
+except ScanHistoryError as error:
+    history_store = None
+    logging.getLogger("cloudsentry.scan_history").error(
+        "Persistent scan history initialization failed: %s", type(error).__name__
+    )
 
 
 # ============================================================
@@ -662,37 +819,53 @@ if scan_clicked:
             )
 
     if new_results is not None:
-        previous_mode = st.session_state.get("scan_mode")
-        if (
-            st.session_state["scan_results"] is not None
-            and previous_mode == operating_mode
-        ):
-            st.session_state["previous_scan_results"] = st.session_state["scan_results"]
-        else:
-            st.session_state["previous_scan_results"] = None
-
         st.session_state["scan_results"] = new_results
         st.session_state["scan_mode"] = operating_mode
         st.session_state["scan_region"] = selected_region
-        st.session_state["scan_number"] += 1
 
         all_new_findings = combine_scan_findings(new_results)
         new_risk_score = calculate_risk_score(all_new_findings)
-        history_record = {
-            "Scan Number": st.session_state["scan_number"],
-            "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Mode": operating_mode,
-            "Region": selected_region or "Demo",
-            "Total Findings": len(all_new_findings),
-            "High Severity": count_severity(all_new_findings, "High"),
-            "Medium Severity": count_severity(all_new_findings, "Medium"),
-            "Unknown / Unverified": count_severity(all_new_findings, "Unknown"),
-            "Assessment Status": assessment_status(all_new_findings),
-            "Risk Score": new_risk_score,
-        }
-        st.session_state["scan_history"].append(history_record)
-        st.session_state["scan_history"] = st.session_state["scan_history"][-20:]
+        coverage = (
+            new_results.get("cloudtrail_account_coverage")
+            if isinstance(new_results, dict) else None
+        )
+        new_assessment_status = scan_assessment_status(
+            all_new_findings, coverage, mode=operating_mode
+        )
+        if history_store is not None:
+            try:
+                saved_scan = history_store.save_scan(
+                    mode=operating_mode,
+                    region=selected_region,
+                    findings=all_new_findings,
+                    risk_score=new_risk_score,
+                    assessment_status=new_assessment_status,
+                    coverage=coverage if isinstance(coverage, dict) else None,
+                )
+                st.session_state["scan_number"] = saved_scan["scan_number"]
+                mode_key = "aws" if operating_mode == "AWS (read-only)" else "demo"
+                st.session_state[f"history_after_scan_{mode_key}"] = saved_scan["scan_id"]
+                if mode_key == "aws":
+                    st.session_state["history_region_filter_aws"] = selected_region
+            except ScanHistoryError as error:
+                st.session_state["scan_number"] += 1
+                st.warning(
+                    f"Scan completed, but persistent history could not be saved "
+                    f"({type(error).__name__}). This scan may be lost after a restart."
+                )
+        else:
+            st.session_state["scan_number"] += 1
+            st.warning(
+                "Scan completed, but persistent history is unavailable; "
+                "this scan will not survive an application restart."
+            )
         st.success("Security scan completed. Review any Unknown findings as unverified.")
+
+
+# Show stored snapshots even in a fresh browser session with no active scan.
+persistent_history = render_scan_history_section(
+    history_store, operating_mode, selected_region
+)
 
 
 # ============================================================
@@ -729,25 +902,13 @@ high_count = count_severity(all_findings, "High")
 medium_count = count_severity(all_findings, "Medium")
 low_count = count_severity(all_findings, "Low")
 unknown_count = count_severity(all_findings, "Unknown")
-current_assessment_status = assessment_status(all_findings)
+scan_coverage = results.get("cloudtrail_account_coverage")
+current_assessment_status = scan_assessment_status(
+    all_findings, scan_coverage, mode=operating_mode
+)
 
 risk_score = calculate_risk_score(all_findings)
 risk_classification = classify_risk(risk_score)
-
-
-# ============================================================
-# SCAN HISTORY
-# ============================================================
-
-st.divider()
-st.header("Scan History")
-
-history_df = pd.DataFrame(st.session_state["scan_history"])
-
-if not history_df.empty:
-    display_dataframe(history_df, hide_index=True)
-else:
-    st.caption("No scans have been recorded in this session yet.")
 
 
 # ============================================================
@@ -783,8 +944,8 @@ with col4:
 
 if current_assessment_status == "Incomplete":
     st.warning(
-        f"Assessment incomplete: {unknown_count} finding(s) are Unknown / unverified. "
-        "The risk score is not proof that the configuration is secure."
+        f"Assessment incomplete: {unknown_count} finding(s) are Unknown / unverified "
+        "or coverage is incomplete. The risk score is not proof that the configuration is secure."
     )
 
 # st.progress only accepts values between 0 and 1.
@@ -804,19 +965,16 @@ st.caption(
 st.divider()
 st.header("Security Risk Trend")
 
-mode_history = [
-    record for record in st.session_state["scan_history"]
-    if record.get("Mode", "Demo") == operating_mode
-]
+mode_history = list(reversed(persistent_history))
 
 if len(mode_history) >= 2:
     trend_df = pd.DataFrame(mode_history)
-    chart_df = trend_df.set_index("Scan Number")[["Risk Score"]]
+    chart_df = trend_df.set_index("scan_number")[["risk_score"]]
 
     st.line_chart(chart_df)
 
-    first_score = int(trend_df.iloc[0]["Risk Score"])
-    latest_score = int(trend_df.iloc[-1]["Risk Score"])
+    first_score = int(trend_df.iloc[0]["risk_score"])
+    latest_score = int(trend_df.iloc[-1]["risk_score"])
     difference = latest_score - first_score
 
     if difference < 0:
@@ -833,88 +991,6 @@ if len(mode_history) >= 2:
         st.info("The risk score is unchanged from the first recorded scan.")
 else:
     st.info("Complete at least two scans to see how the risk score changes.")
-
-
-# ============================================================
-# BEFORE VS AFTER COMPARISON
-# ============================================================
-
-st.divider()
-st.header("Before vs After Security Scan")
-
-previous_results = st.session_state["previous_scan_results"]
-
-if previous_results is not None:
-    previous_findings = combine_scan_findings(previous_results)
-    current_findings = all_findings
-
-    previous_high = count_severity(previous_findings, "High")
-    current_high = count_severity(current_findings, "High")
-
-    previous_medium = count_severity(previous_findings, "Medium")
-    current_medium = count_severity(current_findings, "Medium")
-
-    previous_score = calculate_risk_score(previous_findings)
-    current_score = calculate_risk_score(current_findings)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Before")
-        st.metric("Total Findings", len(previous_findings))
-        st.metric("High Severity", previous_high)
-        st.metric("Medium Severity", previous_medium)
-        st.metric("Risk Score", f"{previous_score}/100")
-
-    with col2:
-        st.subheader("Latest Scan")
-        st.metric(
-            "Total Findings",
-            len(current_findings),
-            delta=len(current_findings) - len(previous_findings),
-            delta_color="inverse",
-        )
-        st.metric(
-            "High Severity",
-            current_high,
-            delta=current_high - previous_high,
-            delta_color="inverse",
-        )
-        st.metric(
-            "Medium Severity",
-            current_medium,
-            delta=current_medium - previous_medium,
-            delta_color="inverse",
-        )
-        st.metric(
-            "Risk Score",
-            f"{current_score}/100",
-            delta=current_score - previous_score,
-            delta_color="inverse",
-        )
-
-    finding_difference = len(current_findings) - len(previous_findings)
-
-    if finding_difference < 0:
-        st.success(
-            f"Findings decreased by {abs(finding_difference)} "
-            "compared with the previous scan."
-        )
-    elif finding_difference > 0:
-        st.warning(
-            f"Findings increased by {finding_difference} "
-            "compared with the previous scan."
-        )
-    else:
-        st.info(
-            "The total number of findings has not changed. "
-            "Compare severity and risk score for further details."
-        )
-else:
-    st.info(
-        "Run another scan after changing the sample configuration "
-        "to compare it with the previous scan."
-    )
 
 
 # ============================================================
