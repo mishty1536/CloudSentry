@@ -77,6 +77,49 @@ def scan_assessment_status(findings, coverage=None, *, mode=None):
     return "Complete"
 
 
+def service_assessment_statuses(findings, coverage=None, *, mode=None, checked_services=()):
+    """Report service check execution independently from overall coverage."""
+    normalized = normalize_findings(findings)
+    checked = {str(service).casefold() for service in checked_services}
+    result = {}
+    for service in ("S3", "IAM", "CloudTrail"):
+        service_findings = [
+            item for item in normalized
+            if str(item.get("service", "")).casefold() == service.casefold()
+        ]
+        if not service_findings and service.casefold() not in checked:
+            result[service] = "Unverified"
+        elif any(item.get("severity") == "Unknown" for item in service_findings):
+            result[service] = "Partial / Unverified"
+        else:
+            result[service] = "Verified"
+
+    if mode in {AWS_MODE, "AWS (read-only)"} and (
+        not isinstance(coverage, dict)
+        or coverage.get("coverage_status") != "complete"
+        or coverage.get("unverified_regions")
+        or coverage.get("inventory_complete") is False
+    ):
+        result["CloudTrail"] = "Partial / Unverified"
+    return result
+
+
+def cloudtrail_describe_access_denied(coverage):
+    """Return whether account-wide trail inventory contains a DescribeTrails denial."""
+    if not isinstance(coverage, dict):
+        return False
+    entries = coverage.get("unverified_regions")
+    if not isinstance(entries, list):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and entry.get("operation") == "DescribeTrails"
+        and str(entry.get("error_code", "")).lower()
+        in {"accessdenied", "accessdeniedexception", "403"}
+        for entry in entries
+    )
+
+
 class ScanHistoryStore:
     """SQLite-backed scan history; each operation uses its own connection."""
 
@@ -133,6 +176,13 @@ class ScanHistoryStore:
             raise ScanHistoryError("Stored scan history contains malformed severity counts") from error
         if not isinstance(counts, dict):
             raise ScanHistoryError("Stored scan history contains malformed severity counts")
+        try:
+            findings = json.loads(row["findings_json"])
+            coverage = json.loads(row["coverage_json"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ScanHistoryError("Stored scan history contains malformed assessment data") from error
+        if not isinstance(findings, list) or not isinstance(coverage, dict):
+            raise ScanHistoryError("Stored scan history contains malformed assessment data")
         return {
             "scan_number": row["scan_number"],
             "scan_id": row["scan_id"],
@@ -143,6 +193,10 @@ class ScanHistoryStore:
             "severity_counts": counts,
             "risk_score": row["risk_score"],
             "assessment_status": row["assessment_status"],
+            "service_statuses": service_assessment_statuses(
+                findings, coverage, mode=row["mode"]
+            ),
+            "cloudtrail_describe_denied": cloudtrail_describe_access_denied(coverage),
         }
 
     def save_scan(

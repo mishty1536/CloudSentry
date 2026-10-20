@@ -25,7 +25,9 @@ from scan_history import (
     ScanHistoryError,
     ScanHistoryStore,
     compare_scans,
+    cloudtrail_describe_access_denied,
     scan_assessment_status,
+    service_assessment_statuses,
 )
 from pdf_reports import generate_pdf_report
 from s3_remediation import PROTECTED_BUCKET_NAME, remediate_s3_default_encryption
@@ -358,6 +360,13 @@ def render_scan_history_section(history_store, operating_mode, selected_region):
             "Unknown": item["severity_counts"].get("Unknown", 0),
             "Risk Score": item["risk_score"],
             "Status": item["assessment_status"],
+            "S3 Checks": item["service_statuses"]["S3"],
+            "IAM Checks": item["service_statuses"]["IAM"],
+            "CloudTrail Coverage": (
+                "Partial / Unverified — SCP blocks DescribeTrails"
+                if item["cloudtrail_describe_denied"]
+                else item["service_statuses"]["CloudTrail"]
+            ),
         }
         for item in summaries
     ]
@@ -845,6 +854,16 @@ scan_coverage = results.get("cloudtrail_account_coverage")
 current_assessment_status = scan_assessment_status(
     all_findings, scan_coverage, mode=operating_mode
 )
+service_result_keys = {"S3": "s3", "IAM": "iam", "CloudTrail": "cloudtrail"}
+service_statuses = service_assessment_statuses(
+    all_findings,
+    scan_coverage,
+    mode=operating_mode,
+    checked_services=(
+        service for service, result_key in service_result_keys.items()
+        if isinstance(results.get(result_key), list)
+    ),
+)
 
 risk_score = calculate_risk_score(all_findings)
 risk_classification = classify_risk(risk_score)
@@ -886,6 +905,11 @@ if current_assessment_status == "Incomplete":
         f"Assessment incomplete: {unknown_count} finding(s) are Unknown / unverified "
         "or coverage is incomplete. The risk score is not proof that the configuration is secure."
     )
+
+st.caption(
+    "Service check status — "
+    + " · ".join(f"{service}: {status}" for service, status in service_statuses.items())
+)
 
 # st.progress only accepts values between 0 and 1.
 st.progress(min(max(float(risk_score), 0.0), 100.0) / 100)
@@ -1020,6 +1044,12 @@ if operating_mode == "AWS (read-only)" and isinstance(account_coverage, dict):
         st.info("Regional inventory and CloudTrail configuration checks completed for all enabled regions.")
     else:
         st.warning("Account-wide coverage is partial or unverified. Unknown regions are not treated as uncovered.")
+        if cloudtrail_describe_access_denied(account_coverage):
+            st.info(
+                "CloudTrail DescribeTrails access is denied in one or more regions. "
+                "An AWS Organizations SCP denial is reported for this operation; "
+                "affected regions remain unverified. S3 and IAM check statuses are shown separately above."
+            )
     st.caption(
         "This assessment checks configured trail scope. It does not verify logging delivery status in every region; "
         "GetTrailStatus is checked only in the selected region. Multi-region and organization trail metadata "
@@ -1159,11 +1189,20 @@ report_df = findings_df.copy()
 if not report_df.empty:
     report_region = st.session_state.get("scan_region") or "Demo"
     report_notes = [f"Assessment status: {current_assessment_status}."]
+    report_notes.extend(
+        f"{service} check status: {status}."
+        for service, status in service_statuses.items()
+    )
     if operating_mode == "AWS (read-only)":
         report_notes.append(f"Selected AWS region: {report_region}.")
         if isinstance(account_coverage, dict):
             coverage_status = account_coverage.get("coverage_status", "unknown")
             report_notes.append(f"Account-wide CloudTrail coverage status: {coverage_status}.")
+            if cloudtrail_describe_access_denied(account_coverage):
+                report_notes.append(
+                    "CloudTrail DescribeTrails access is denied in one or more regions. "
+                    "An AWS Organizations SCP denial is reported; affected regions remain unverified."
+                )
             for label, key in (
                 ("Covered regions", "covered_regions"),
                 ("Uncovered regions", "uncovered_regions"),
@@ -1216,6 +1255,9 @@ if not report_df.empty:
             {"Metric": "Low Severity", "Value": low_count},
             {"Metric": "Unknown / Unverified Findings", "Value": unknown_count},
             {"Metric": "Assessment Status", "Value": current_assessment_status},
+            {"Metric": "S3 Check Status", "Value": service_statuses["S3"]},
+            {"Metric": "IAM Check Status", "Value": service_statuses["IAM"]},
+            {"Metric": "CloudTrail Coverage Status", "Value": service_statuses["CloudTrail"]},
             {"Metric": "Risk Score", "Value": risk_score},
             {"Metric": "Risk Classification", "Value": risk_classification},
         ]

@@ -10,8 +10,10 @@ from scan_history import (
     ScanHistoryError,
     ScanHistoryStore,
     compare_scans,
+    cloudtrail_describe_access_denied,
     default_database_path,
     scan_assessment_status,
+    service_assessment_statuses,
 )
 
 
@@ -109,6 +111,68 @@ class ScanHistoryStoreTests(unittest.TestCase):
             mode="AWS", region="us-east-1", findings=[], status="Complete", coverage=None
         )
         self.assertEqual(explicit_complete["assessment_status"], "Incomplete")
+
+    def test_saved_scan_summary_retains_cloudtrail_access_denial_context(self):
+        saved = self.save(
+            mode="AWS",
+            region="ap-southeast-2",
+            findings=[
+                {**finding("Info", "S3 checked", "bucket-a"), "service": "S3"},
+                {**finding("Info", "IAM checked", "account"), "service": "IAM"},
+            ],
+            coverage={
+                "coverage_status": "partial",
+                "unverified_regions": [{
+                    "region": "us-east-1",
+                    "operation": "DescribeTrails",
+                    "error_code": "AccessDenied",
+                }],
+            },
+        )
+
+        summary = self.store.list_scans(mode="AWS")[0]
+
+        self.assertEqual(saved["assessment_status"], "Incomplete")
+        self.assertEqual(summary["service_statuses"]["S3"], "Verified")
+        self.assertEqual(summary["service_statuses"]["IAM"], "Verified")
+        self.assertEqual(summary["service_statuses"]["CloudTrail"], "Partial / Unverified")
+        self.assertTrue(summary["cloudtrail_describe_denied"])
+
+    def test_service_statuses_separate_verified_checks_from_partial_cloudtrail_coverage(self):
+        findings = [
+            {**finding("Info", "S3 check completed", "bucket-a"), "service": "S3"},
+            {**finding("High", "IAM policy finding", "policy-a"), "service": "IAM"},
+            {**finding("Unknown", "Trail inventory unavailable", "us-east-1"), "service": "CloudTrail"},
+        ]
+        coverage = {
+            "coverage_status": "partial",
+            "unverified_regions": [{
+                "region": "us-east-1",
+                "operation": "DescribeTrails",
+                "error_code": "AccessDenied",
+            }],
+        }
+
+        statuses = service_assessment_statuses(
+            findings, coverage, mode="AWS (read-only)"
+        )
+
+        self.assertEqual(statuses["S3"], "Verified")
+        self.assertEqual(statuses["IAM"], "Verified")
+        self.assertEqual(statuses["CloudTrail"], "Partial / Unverified")
+        self.assertEqual(
+            scan_assessment_status(findings, coverage, mode="AWS (read-only)"),
+            "Incomplete",
+        )
+        self.assertTrue(cloudtrail_describe_access_denied(coverage))
+        self.assertFalse(cloudtrail_describe_access_denied({"unverified_regions": []}))
+
+    def test_clean_checked_service_can_be_marked_verified(self):
+        statuses = service_assessment_statuses(
+            [], mode="Demo", checked_services={"S3", "IAM", "CloudTrail"}
+        )
+
+        self.assertEqual(set(statuses.values()), {"Verified"})
 
     def test_failed_scan_is_not_created_by_storage_api(self):
         self.assertEqual(self.store.list_scans(), [])
