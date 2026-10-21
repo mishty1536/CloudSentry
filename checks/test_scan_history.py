@@ -6,12 +6,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+
 from scan_history import (
     ScanHistoryError,
     ScanHistoryStore,
     compare_scans,
+    comparison_findings_dataframe,
+    comparison_summary_rows,
+    cloudtrail_describe_access_denied,
+    cloudtrail_describe_scp_denied,
+    cloudtrail_coverage_label,
     default_database_path,
     scan_assessment_status,
+    service_assessment_statuses,
 )
 
 
@@ -109,6 +117,97 @@ class ScanHistoryStoreTests(unittest.TestCase):
             mode="AWS", region="us-east-1", findings=[], status="Complete", coverage=None
         )
         self.assertEqual(explicit_complete["assessment_status"], "Incomplete")
+
+    def test_saved_scan_summary_retains_cloudtrail_access_denial_context(self):
+        saved = self.save(
+            mode="AWS",
+            region="ap-southeast-2",
+            findings=[
+                {**finding("Info", "S3 checked", "bucket-a"), "service": "S3"},
+                {**finding("Info", "IAM checked", "account"), "service": "IAM"},
+            ],
+            coverage={
+                "coverage_status": "partial",
+                "unverified_regions": [{
+                    "region": "us-east-1",
+                    "operation": "DescribeTrails",
+                    "error_code": "AccessDenied",
+                }],
+            },
+        )
+
+        summary = self.store.list_scans(mode="AWS")[0]
+
+        self.assertEqual(saved["assessment_status"], "Incomplete")
+        self.assertEqual(summary["service_statuses"]["S3"], "Verified")
+        self.assertEqual(summary["service_statuses"]["IAM"], "Verified")
+        self.assertEqual(summary["service_statuses"]["CloudTrail"], "Partial / Unverified")
+        self.assertTrue(summary["cloudtrail_describe_denied"])
+        self.assertFalse(summary["cloudtrail_scp_denied"])
+
+    def test_scp_attribution_requires_explicit_denial_source_evidence(self):
+        access_denied = {
+            "unverified_regions": [{
+                "operation": "DescribeTrails",
+                "error_code": "AccessDenied",
+                "reason": "AWS denied this read-only request.",
+            }],
+        }
+        confirmed_scp = {
+            "unverified_regions": [{
+                "operation": "DescribeTrails",
+                "error_code": "AccessDenied",
+                "reason": "Access denied by AWS Organizations SCP",
+            }],
+        }
+
+        self.assertTrue(cloudtrail_describe_access_denied(access_denied))
+        self.assertFalse(cloudtrail_describe_scp_denied(access_denied))
+        self.assertTrue(cloudtrail_describe_scp_denied(confirmed_scp))
+        self.assertEqual(cloudtrail_coverage_label({
+            "cloudtrail_describe_denied": True,
+            "cloudtrail_scp_denied": False,
+        }), "Partial / Unverified - Access denied for DescribeTrails; source of denial not confirmed")
+        self.assertEqual(cloudtrail_coverage_label({
+            "cloudtrail_describe_denied": True,
+            "cloudtrail_scp_denied": True,
+        }), "Partial / Unverified - DescribeTrails denied by AWS Organizations SCP")
+
+    def test_service_statuses_separate_verified_checks_from_partial_cloudtrail_coverage(self):
+        findings = [
+            {**finding("Info", "S3 check completed", "bucket-a"), "service": "S3"},
+            {**finding("High", "IAM policy finding", "policy-a"), "service": "IAM"},
+            {**finding("Unknown", "Trail inventory unavailable", "us-east-1"), "service": "CloudTrail"},
+        ]
+        coverage = {
+            "coverage_status": "partial",
+            "unverified_regions": [{
+                "region": "us-east-1",
+                "operation": "DescribeTrails",
+                "error_code": "AccessDenied",
+            }],
+        }
+
+        statuses = service_assessment_statuses(
+            findings, coverage, mode="AWS (read-only)"
+        )
+
+        self.assertEqual(statuses["S3"], "Verified")
+        self.assertEqual(statuses["IAM"], "Verified")
+        self.assertEqual(statuses["CloudTrail"], "Partial / Unverified")
+        self.assertEqual(
+            scan_assessment_status(findings, coverage, mode="AWS (read-only)"),
+            "Incomplete",
+        )
+        self.assertTrue(cloudtrail_describe_access_denied(coverage))
+        self.assertFalse(cloudtrail_describe_access_denied({"unverified_regions": []}))
+
+    def test_clean_checked_service_can_be_marked_verified(self):
+        statuses = service_assessment_statuses(
+            [], mode="Demo", checked_services={"S3", "IAM", "CloudTrail"}
+        )
+
+        self.assertEqual(set(statuses.values()), {"Verified"})
 
     def test_failed_scan_is_not_created_by_storage_api(self):
         self.assertEqual(self.store.list_scans(), [])
@@ -231,6 +330,111 @@ class ScanComparisonTests(unittest.TestCase):
         result = compare_scans(before, after)
         self.assertEqual(result["resolved"], [])
         self.assertEqual(len(result["unverified_before"]), 1)
+
+    def test_partial_cloudtrail_still_compares_verified_s3_and_iam(self):
+        before_findings = [
+            {**finding("High", "Old S3 issue", "bucket-a"), "service": "S3"},
+            {**finding("High", "Old IAM issue", "policy-a"), "service": "IAM"},
+            {**finding("High", "Trail issue", "trail-a"), "service": "CloudTrail"},
+        ]
+        after_findings = [
+            {**finding("Low", "New IAM issue", "policy-b"), "service": "IAM"},
+        ]
+        coverage = {
+            "coverage_status": "partial",
+            "unverified_regions": [{"operation": "DescribeTrails", "error_code": "AccessDenied"}],
+            "checked_services": ["S3", "IAM", "CloudTrail"],
+            "service_statuses": {
+                "S3": "Verified", "IAM": "Verified", "CloudTrail": "Partial / Unverified"
+            },
+        }
+        before = self.save(findings=before_findings, risk=70, mode="AWS", region="us-east-1", coverage=coverage)
+        after = self.save(findings=after_findings, risk=20, mode="AWS", region="us-east-1", coverage=coverage)
+
+        result = compare_scans(before, after)
+        self.assertEqual(result["comparable_services"], ["S3", "IAM"])
+        self.assertEqual([item["resource"] for item in result["resolved"]], ["bucket-a", "policy-a"])
+        self.assertEqual([item["resource"] for item in result["newly_detected"]], ["policy-b"])
+        self.assertEqual([item["resource"] for item in result["unverified_before"]], ["trail-a"])
+
+    def test_service_verified_only_in_one_scan_is_not_comparable(self):
+        base = {
+            "coverage_status": "partial", "unverified_regions": [],
+            "checked_services": ["S3", "IAM"],
+            "service_statuses": {"S3": "Verified", "IAM": "Unverified", "CloudTrail": "Unverified"},
+        }
+        other = {
+            **base, "checked_services": ["S3", "IAM"],
+            "service_statuses": {"S3": "Unverified", "IAM": "Verified", "CloudTrail": "Unverified"},
+        }
+        before = self.save(findings=[{**finding("High", "S3 issue", "bucket-a"), "service": "S3"}], risk=100,
+                          mode="AWS", region="us-east-1", coverage=base)
+        after = self.save(findings=[], risk=0, mode="AWS", region="us-east-1", coverage=other)
+        result = compare_scans(before, after)
+        self.assertNotIn("S3", result["comparable_services"])
+        self.assertEqual(result["resolved"], [])
+        self.assertEqual(result["unverified_before"][0]["resource"], "bucket-a")
+
+    def test_comparison_table_has_stable_columns_and_no_missing_values(self):
+        frame = comparison_findings_dataframe([
+            {"service": "S3", "severity": "High", "finding": "Issue", "resource": "bucket-a"},
+            {"service": "IAM", "severity": "Low", "finding_title": "Other", "policy_arn": "arn:example"},
+        ])
+        self.assertEqual(list(frame.columns), ["Service", "Severity", "Finding", "Resource", "Recommendation"])
+        self.assertFalse(frame.isna().any().any())
+        self.assertEqual(frame.loc[1, "Finding"], "Other")
+        self.assertEqual(frame.loc[1, "Resource"], "arn:example")
+
+    def test_before_after_summary_rows_have_one_consistent_delta_column(self):
+        coverage = {
+            "coverage_status": "partial",
+            "unverified_regions": [{"operation": "DescribeTrails", "error_code": "AccessDenied"}],
+            "checked_services": ["S3", "IAM", "CloudTrail"],
+            "service_statuses": {
+                "S3": "Verified", "IAM": "Verified", "CloudTrail": "Partial / Unverified"
+            },
+        }
+        before = self.save([
+            {**finding("High", "S3 issue", "bucket-a"), "service": "S3"},
+            {**finding("Medium", "IAM issue", "policy-a"), "service": "IAM"},
+            {**finding("High", "Unavailable trail", "trail-a"), "service": "CloudTrail"},
+        ], 17, mode="AWS", region="us-east-1", coverage=coverage)
+        after = self.save([
+            {**finding("Medium", "S3 issue", "bucket-a"), "service": "S3"},
+            {**finding("Low", "IAM new issue", "policy-b"), "service": "IAM"},
+        ], 62, mode="AWS", region="us-east-1", coverage=coverage)
+
+        rows = comparison_summary_rows(compare_scans(before, after))
+        frame = pd.DataFrame(rows)
+        self.assertEqual(list(frame.columns), ["Measure", "Before", "After", "Change"])
+        self.assertFalse(frame.isna().any().any())
+        self.assertEqual(frame.loc[0].to_dict(), {
+            "Measure": "Comparable service findings", "Before": 2, "After": 2, "Change": 0,
+        })
+        self.assertEqual(frame.loc[1].to_dict(), {
+            "Measure": "High", "Before": 1, "After": 0, "Change": -1,
+        })
+        self.assertEqual(frame.loc[2].to_dict(), {
+            "Measure": "Medium", "Before": 1, "After": 1, "Change": 0,
+        })
+        self.assertEqual(frame.loc[3].to_dict(), {
+            "Measure": "Low", "Before": 0, "After": 1, "Change": 1,
+        })
+        self.assertEqual(frame.loc[5].to_dict(), {
+            "Measure": "Risk score", "Before": 17, "After": 62, "Change": 45,
+        })
+
+    def test_comparison_summary_uses_na_when_no_services_are_comparable(self):
+        before = self.save([], 0, status="Incomplete")
+        after = self.save([], 0, status="Incomplete")
+        frame = pd.DataFrame(comparison_summary_rows(compare_scans(before, after)))
+
+        self.assertEqual(list(frame.columns), ["Measure", "Before", "After", "Change"])
+        self.assertEqual(frame.loc[0].to_dict(), {
+            "Measure": "Comparable service findings", "Before": "N/A",
+            "After": "N/A", "Change": "N/A",
+        })
+        self.assertEqual(frame.loc[1, "Before"], "N/A")
 
     def test_identical_scans_are_detected_independent_of_finding_order(self):
         first = self.save(

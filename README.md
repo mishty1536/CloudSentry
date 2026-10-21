@@ -25,11 +25,11 @@ While enterprise Cloud Security Posture Management (CSPM) suites exist, they fre
 
 ## Live Demo
 
-**Application URL:** http://3.26.214.34:8501
+**Application URL:** http://13.203.75.249:8501
 
-CloudSentry is deployed on an Amazon EC2 instance running Amazon Linux 2023. The public demo deployment operates in Demo mode using sample configurations.
+CloudSentry is deployed on an Amazon EC2 instance running Amazon Linux 2023. The current EC2 deployment has been tested with live AWS (read-only) scanning. Because the dashboard is unauthenticated, do not leave AWS scanning enabled while the application is publicly accessible; use the security guidance below before sharing the live URL.
 
-> **Security notice:** The demo is served over HTTP, and port 8501 is publicly accessible. Do not submit sensitive information to this deployment. AWS live scanning must remain disabled for this unauthenticated public demo.
+> **Security notice:** The demo is served over HTTP, and port 8501 is publicly accessible. Do not submit sensitive information to this deployment. The dashboard uses HTTP and has no application-level login. Restrict access to trusted IP addresses or disable live AWS scanning before making the dashboard publicly accessible. Do not enter secrets or sensitive information.
 
 The application is available while the EC2 instance and Streamlit process are running. Its public IP address may change if the instance is stopped and restarted.
 
@@ -74,9 +74,9 @@ The application is available while the EC2 instance and Streamlit process are ru
 | **Data Processing** | Data Manipulation | **Pandas (v3.0+)** | Findings aggregation, tabular transformation, and display formatting |
 | **Cloud Integration** | AWS SDK | **Boto3 & Botocore (v1.43+)** | Read-only AWS API interactions across S3, IAM, CloudTrail, and EC2 |
 | **Document Generation** | Reporting Engine | **ReportLab (v4.0+)** | In-memory PDF generation with styled tables, column wrapping, and pagination |
-| **Runtime & Language** | Core Engine | **Python 3.11** | Backend execution runtime |
+| **Runtime & Language** | Core Engine | **Python 3.12** | Backend execution runtime |
 | **Hosting & Compute** | Cloud Infrastructure | **Amazon EC2** | Amazon Linux 2023 instance hosting the Streamlit web service |
-| **Testing & Quality** | Quality Assurance | **Python `unittest` & Botocore `Stubber`** | Automated test suite with 85 unit and integration tests using mocked AWS clients |
+| **Testing & Quality** | Quality Assurance | **Python `unittest` & Botocore `Stubber`** | Automated unit and integration tests using mocked AWS clients |
 
 ---
 
@@ -166,7 +166,7 @@ The `checks/` directory contains the automated tests. The application loads `the
 
 ### Prerequisites
 
-- Python 3.11
+- Python 3.12
 - Git
 - Internet access to install Python dependencies
 
@@ -184,14 +184,14 @@ Create and activate a virtual environment.
 **Windows PowerShell:**
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.12 -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
 **Linux / macOS:**
 
 ```bash
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 ```
 
@@ -214,7 +214,7 @@ Demo mode is the default and works without AWS credentials.
 
 ## AWS EC2 Deployment
 
-CloudSentry has been deployed to an Amazon EC2 instance using Amazon Linux 2023, Python 3.11, and Streamlit.
+CloudSentry has been deployed to an Amazon EC2 instance using Amazon Linux 2023, Python 3.12, and Streamlit.
 
 ### Deployment Configuration
 
@@ -223,18 +223,18 @@ CloudSentry has been deployed to an Amazon EC2 instance using Amazon Linux 2023,
 | Cloud provider | AWS |
 | Compute service | Amazon EC2 |
 | Operating system | Amazon Linux 2023 |
-| Python version | Python 3.11 |
+| Python version | Python 3.12 |
 | Application framework | Streamlit |
 | Application port | TCP 8501 |
-| Deployment mode | Public Demo mode |
-| AWS scanning | Disabled for the public demo |
+| Deployment mode | Demo and AWS read-only modes are available in the application |
+| AWS scanning | Tested with the attached EC2 IAM role; protect access before sharing publicly |
 
 ### Deployment Steps
 
 Install the required system packages on the EC2 instance:
 
 ```bash
-sudo dnf install git python3.11 python3.11-pip -y
+sudo dnf install git python3.12 python3.12-pip -y
 ```
 
 Clone the repository:
@@ -247,8 +247,8 @@ cd CloudSentry
 Create and activate the Python environment:
 
 ```bash
-python3.11 -m venv .venv311
-source .venv311/bin/activate
+python3.12 -m venv .venv312
+source .venv312/bin/activate
 ```
 
 Install the dependencies:
@@ -268,11 +268,22 @@ python -m streamlit run app.py \
 
 Configure the EC2 security group's inbound rules to allow TCP traffic on port 8501 for public demo access. SSH access on port 22 should remain restricted to trusted IP addresses.
 
-The Streamlit process must remain running for the application to be available. Automatic restart after an EC2 reboot has not been configured.
+The Streamlit process must remain running for the application to be available. For the current EC2 deployment, use the configured `cloudsentry.service` systemd unit to keep the dashboard running and start it after reboot. Check its status with `sudo systemctl status cloudsentry.service --no-pager`.
 
-### Public Deployment Security
+### Current Deployment Notes
 
-- Keep `CLOUDSENTRY_ENABLE_AWS_SCAN` unset on the public demo instance.
+- **AWS Region:** Asia Pacific (Mumbai), `ap-south-1`
+- **EC2 operating system:** Amazon Linux 2023
+- **Python runtime on EC2:** Python 3.12
+- **Streamlit port:** TCP 8501
+- **AWS access:** The EC2 instance is configured to use an attached IAM role; do not create or commit long-term access keys for the app.
+- **Current public URL:** `http://13.203.75.249:8501` (the IP can change if the instance is stopped and restarted).
+
+The dashboard has been tested with live AWS read-only scans. The live URL is useful for a faculty demonstration, but an unauthenticated dashboard should not be exposed to everyone while AWS scanning is enabled. Before sharing broadly, either restrict port 8501 to the faculty/group members' known IP addresses, or disable AWS mode for the public demo. A public IP allowlist may need updating if your network IP changes.
+
+## Public Deployment Security
+
+- For an unauthenticated public deployment, keep `CLOUDSENTRY_ENABLE_AWS_SCAN` unset. Enable it only in a controlled environment with access restrictions.
 - Do not place AWS credentials, access keys, tokens, or secrets in the source code or public repository.
 - Do not enable live AWS scanning on an unauthenticated public instance.
 - The current demo uses HTTP rather than HTTPS.
@@ -398,6 +409,10 @@ The policy grants read-only access to the listed configuration APIs. It does not
 
 If a required read permission is missing, throttled, or unavailable, the affected check is reported as **Unknown / unverified**.
 
+## Remediation Model
+
+CloudSentry primarily **detects and explains** potential misconfigurations; it does not automatically remediate all findings. The optional S3 default-encryption workflow is a narrowly scoped exception and must be explicitly enabled with environment variables, an approved permission, and a dedicated test bucket. Do not enable that workflow against production buckets for a classroom demonstration. Root-account MFA is configured directly through the AWS console, then verified by running another scan.
+
 ## AWS Check Coverage and Limitations
 
 ### S3 Auditing
@@ -445,7 +460,7 @@ The dashboard's prototype risk score retains its existing formula. Unknown sever
 Run the complete test suite from the project root in the Windows virtual environment:
 
 ```powershell
-.venv\Scripts\python.exe -B -m unittest discover -s checks -v
+.venv312\Scripts\python.exe -B -m unittest discover -s checks -v
 ```
 
 The AWS integration tests use mocked clients, synthetic responses, and Botocore `Stubber` clients with dummy test credentials. They do not read AWS credentials or call AWS APIs.
@@ -482,7 +497,7 @@ Back up a live database consistently with Python's SQLite backup API (replace th
 ```bash
 source_path="$HOME/.local/share/cloudsentry/scan_history.db"
 backup_path="$HOME/cloudsentry-scan-history-$(date -u +%Y%m%dT%H%M%SZ).db"
-python3.11 - "$source_path" "$backup_path" <<'PY'
+python3.12 - "$source_path" "$backup_path" <<'PY'
 import sqlite3
 import sys
 
