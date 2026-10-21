@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import time
 import uuid
 
 from dashboard_helpers import normalize_findings
@@ -80,6 +81,8 @@ def scan_assessment_status(findings, coverage=None, *, mode=None):
 def service_assessment_statuses(findings, coverage=None, *, mode=None, checked_services=()):
     """Report service check execution independently from overall coverage."""
     normalized = normalize_findings(findings)
+    if isinstance(coverage, dict):
+        checked_services = coverage.get("checked_services", checked_services)
     checked = {str(service).casefold() for service in checked_services}
     result = {}
     for service in ("S3", "IAM", "CloudTrail"):
@@ -93,6 +96,12 @@ def service_assessment_statuses(findings, coverage=None, *, mode=None, checked_s
             result[service] = "Partial / Unverified"
         else:
             result[service] = "Verified"
+
+    persisted = coverage.get("service_statuses") if isinstance(coverage, dict) else None
+    if isinstance(persisted, dict):
+        for service in result:
+            if persisted.get(service) in {"Verified", "Partial / Unverified", "Unverified"}:
+                result[service] = persisted[service]
 
     if mode in {AWS_MODE, "AWS (read-only)"} and (
         not isinstance(coverage, dict)
@@ -120,6 +129,46 @@ def cloudtrail_describe_access_denied(coverage):
     )
 
 
+def cloudtrail_describe_scp_denied(coverage):
+    """Return true only when DescribeTrails denial evidence names an SCP source."""
+    if not isinstance(coverage, dict):
+        return False
+    entries = coverage.get("unverified_regions")
+    if not isinstance(entries, list):
+        return False
+    denied_codes = {"accessdenied", "accessdeniedexception", "403"}
+    explicit_phrases = (
+        "denied by aws organizations scp",
+        "blocked by aws organizations scp",
+        "explicit deny in a service control policy",
+        "denied by a service control policy",
+    )
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("operation") != "DescribeTrails":
+            continue
+        code = str(entry.get("error_code", "")).lower()
+        if code not in denied_codes:
+            continue
+        source = str(entry.get("denial_source", "")).strip().casefold()
+        if source in {"scp", "aws organizations scp", "service control policy"}:
+            return True
+        evidence = " ".join(
+            str(entry.get(key, "")) for key in ("reason", "message")
+        ).casefold()
+        if any(phrase in evidence for phrase in explicit_phrases):
+            return True
+    return False
+
+
+def cloudtrail_coverage_label(summary):
+    """Describe history coverage without inferring an authorization source."""
+    if summary.get("cloudtrail_scp_denied"):
+        return "Partial / Unverified - DescribeTrails denied by AWS Organizations SCP"
+    if summary.get("cloudtrail_describe_denied"):
+        return "Partial / Unverified - Access denied for DescribeTrails; source of denial not confirmed"
+    return summary.get("service_statuses", {}).get("CloudTrail", "Unverified")
+
+
 class ScanHistoryStore:
     """SQLite-backed scan history; each operation uses its own connection."""
 
@@ -138,7 +187,7 @@ class ScanHistoryStore:
             self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             connection = self._connect()
             try:
-                connection.execute("PRAGMA journal_mode = WAL")
+                self._enable_wal_with_retry(connection)
                 with connection:
                     connection.execute(
                         """CREATE TABLE IF NOT EXISTS scans (
@@ -169,6 +218,25 @@ class ScanHistoryStore:
             raise ScanHistoryError("Could not initialize persistent scan history") from error
 
     @staticmethod
+    def _enable_wal_with_retry(connection):
+        """Retry only transient lock contention while concurrent stores set WAL mode."""
+        deadline = time.monotonic() + 15
+        delay = 0.01
+        while True:
+            try:
+                connection.execute("PRAGMA journal_mode = WAL")
+                return
+            except sqlite3.OperationalError as error:
+                message = str(error).lower()
+                if not any(token in message for token in ("locked", "busy")):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 0.25)
+
+    @staticmethod
     def _summary_from_row(row):
         try:
             counts = json.loads(row["severity_counts_json"])
@@ -197,6 +265,7 @@ class ScanHistoryStore:
                 findings, coverage, mode=row["mode"]
             ),
             "cloudtrail_describe_denied": cloudtrail_describe_access_denied(coverage),
+            "cloudtrail_scp_denied": cloudtrail_describe_scp_denied(coverage),
         }
 
     def save_scan(
@@ -390,32 +459,56 @@ def compare_scans(before, after):
         finding for finding in after_findings
         if not isinstance(finding, dict) or finding.get("severity") not in SEVERITIES[:-1]
     ]
-    before_keys = Counter(finding_identity(item) for item in before_known)
-    after_keys = Counter(finding_identity(item) for item in after_known)
-    unmatched_before = _difference(before_known, after_keys)
-    unmatched_after = _difference(after_known, before_keys)
     before_complete = before.get("assessment_status") == "Complete"
     after_complete = after.get("assessment_status") == "Complete"
-
-    resolved = unmatched_before if after_complete else []
-    newly_detected = unmatched_after if before_complete else []
     unverified_before = list(before_unknown)
     unverified_after = list(after_unknown)
-    if not after_complete:
-        unverified_before.extend(unmatched_before)
-    if not before_complete:
-        unverified_after.extend(unmatched_after)
 
-    remaining_counts = before_keys & after_keys
-    remaining = []
-    for finding in after_known:
-        identity = finding_identity(finding)
-        if remaining_counts[identity]:
-            remaining.append(finding)
-            remaining_counts[identity] -= 1
+    before_statuses = service_assessment_statuses(
+        before_findings, before.get("coverage"), mode=before_mode
+    )
+    after_statuses = service_assessment_statuses(
+        after_findings, after.get("coverage"), mode=after_mode
+    )
+    comparable_services = [
+        service for service in ("S3", "IAM", "CloudTrail")
+        if before_statuses[service] == "Verified" and after_statuses[service] == "Verified"
+    ]
+    resolved, newly_detected, remaining = [], [], []
+    for service in ("S3", "IAM", "CloudTrail"):
+        before_service = [
+            item for item in before_known
+            if str(item.get("service", "")).casefold() == service.casefold()
+        ]
+        after_service = [
+            item for item in after_known
+            if str(item.get("service", "")).casefold() == service.casefold()
+        ]
+        if service not in comparable_services:
+            unverified_before.extend(before_service)
+            unverified_after.extend(after_service)
+            continue
+        before_keys = Counter(finding_identity(item) for item in before_service)
+        after_keys = Counter(finding_identity(item) for item in after_service)
+        resolved.extend(_difference(before_service, after_keys))
+        newly_detected.extend(_difference(after_service, before_keys))
+        remaining_counts = before_keys & after_keys
+        for finding in after_service:
+            identity = finding_identity(finding)
+            if remaining_counts[identity]:
+                remaining.append(finding)
+                remaining_counts[identity] -= 1
 
-    before_counts = before.get("severity_counts") or _finding_counts(before_findings)
-    after_counts = after.get("severity_counts") or _finding_counts(after_findings)
+    before_comparable = [
+        item for item in before_findings
+        if isinstance(item, dict) and item.get("service") in comparable_services
+    ]
+    after_comparable = [
+        item for item in after_findings
+        if isinstance(item, dict) and item.get("service") in comparable_services
+    ]
+    before_counts = _finding_counts(before_comparable)
+    after_counts = _finding_counts(after_comparable)
     severity = {
         key: {
             "before": int(before_counts.get(key, 0)),
@@ -434,8 +527,8 @@ def compare_scans(before, after):
     )
 
     return {
-        "before_total": int(before.get("total_findings", len(before_findings))),
-        "after_total": int(after.get("total_findings", len(after_findings))),
+        "before_total": len(before_comparable),
+        "after_total": len(after_comparable),
         "before_risk_score": before.get("risk_score", 0),
         "after_risk_score": after.get("risk_score", 0),
         "risk_score_delta": int(after.get("risk_score", 0)) - int(before.get("risk_score", 0)),
@@ -448,4 +541,72 @@ def compare_scans(before, after):
         "identical": identical,
         "before_complete": before_complete,
         "after_complete": after_complete,
+        "before_service_statuses": before_statuses,
+        "after_service_statuses": after_statuses,
+        "comparable_services": comparable_services,
+        "not_comparable_services": [
+            service for service in ("S3", "IAM", "CloudTrail")
+            if service not in comparable_services
+        ],
     }
+
+
+def comparison_findings_dataframe(records):
+    """Build a consistent, compact table for comparison finding rows."""
+    import pandas as pd
+
+    columns = ["Service", "Severity", "Finding", "Resource", "Recommendation"]
+    aliases = {
+        "Service": ("service",),
+        "Severity": ("severity",),
+        "Finding": ("finding", "finding_title", "title"),
+        "Resource": ("resource", "resource_id", "resource_arn", "bucket_name", "policy_arn"),
+        "Recommendation": ("recommendation",),
+    }
+    rows = []
+    for record in records:
+        row = {}
+        for column in columns:
+            value = next((record.get(key) for key in aliases[column]
+                          if record.get(key) is not None and str(record.get(key)).strip()), "—")
+            row[column] = value
+        rows.append(row)
+    return pd.DataFrame(rows, columns=columns)
+
+
+def comparison_summary_rows(comparison):
+    """Return uniformly shaped summary rows for the before/after table."""
+    comparable = bool(comparison.get("comparable_services"))
+    rows = []
+
+    before_total = comparison.get("before_total", "N/A") if comparable else "N/A"
+    after_total = comparison.get("after_total", "N/A") if comparable else "N/A"
+    rows.append({
+        "Measure": "Comparable service findings",
+        "Before": before_total,
+        "After": after_total,
+        "Change": after_total - before_total if comparable else "N/A",
+    })
+
+    for severity in ("High", "Medium", "Low", "Info"):
+        counts = comparison.get("severity", {}).get(severity, {})
+        before = counts.get("before", "N/A") if comparable else "N/A"
+        after = counts.get("after", "N/A") if comparable else "N/A"
+        delta = counts.get("delta", "N/A") if comparable else "N/A"
+        rows.append({
+            "Measure": severity,
+            "Before": before,
+            "After": after,
+            "Change": delta,
+        })
+
+    before_score = comparison.get("before_risk_score")
+    after_score = comparison.get("after_risk_score")
+    score_delta = comparison.get("risk_score_delta")
+    rows.append({
+        "Measure": "Risk score",
+        "Before": before_score if before_score is not None else "N/A",
+        "After": after_score if after_score is not None else "N/A",
+        "Change": score_delta if score_delta is not None else "N/A",
+    })
+    return rows

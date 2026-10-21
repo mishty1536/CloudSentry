@@ -7,6 +7,7 @@ from dashboard_helpers import (
     calculate_risk_score,
     combine_findings,
     count_severity,
+    has_verified_findings,
     make_findings_dataframe,
     prepare_dataframe_for_display,
 )
@@ -15,6 +16,12 @@ from dashboard_helpers import (
 class DashboardHelperTests(unittest.TestCase):
     def test_empty_findings_have_zero_score(self):
         self.assertEqual(calculate_risk_score([]), 0)
+        self.assertFalse(has_verified_findings([]))
+
+    def test_unknown_only_findings_have_no_interpretable_risk_score(self):
+        findings = [{"severity": "Unknown"}, {}]
+        self.assertEqual(calculate_risk_score(findings), 0)
+        self.assertFalse(has_verified_findings(findings))
 
     def test_mixed_severities_keep_existing_average_formula(self):
         findings = [
@@ -26,15 +33,15 @@ class DashboardHelperTests(unittest.TestCase):
         # (10 + 5 + 2) / (3 * 10) * 100 = 56.67, rounded to 57.
         self.assertEqual(calculate_risk_score(findings), 57)
 
-    def test_unknown_and_missing_severities_keep_formula_and_remain_countable(self):
+    def test_unknown_and_missing_severities_are_excluded_from_risk_score(self):
         findings = [
             {"severity": "High"},
-            {"severity": "Critical", "finding": "new severity value"},
-            {"finding": "missing severity"},
+            {"severity": "Unknown"},
+            {},
         ]
 
-        # Unknown values contribute zero points but remain in the denominator.
-        self.assertEqual(calculate_risk_score(findings), 33)
+        # Only the verified High finding contributes to the score.
+        self.assertEqual(calculate_risk_score(findings), 100)
         self.assertEqual(count_severity(findings, "Unknown"), 2)
 
     def test_unrecognized_severity_is_normalized_as_unknown(self):

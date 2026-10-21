@@ -169,7 +169,7 @@ class AppIntegrationTests(unittest.TestCase):
                 "region": "us-east-1",
                 "operation": "DescribeTrails",
                 "error_code": "AccessDenied",
-                "reason": "Access denied by AWS Organizations SCP",
+                "reason": "AWS denied this read-only request; source not confirmed.",
             }],
             "covered_regions": [],
             "uncovered_regions": [],
@@ -195,14 +195,21 @@ class AppIntegrationTests(unittest.TestCase):
             self.assertEqual(saved_aws_scans[0]["assessment_status"], "Incomplete")
             self.assertEqual(saved_aws_scans[0]["service_statuses"]["S3"], "Verified")
             self.assertEqual(saved_aws_scans[0]["service_statuses"]["IAM"], "Verified")
+            saved_snapshot = ScanHistoryStore(
+                os.environ["CLOUDSENTRY_HISTORY_DB"]
+            ).get_scan(saved_aws_scans[0]["scan_id"])
+            self.assertEqual(saved_snapshot["coverage"]["checked_services"], ["S3", "IAM", "CloudTrail"])
+            self.assertEqual(saved_snapshot["coverage"]["service_statuses"]["S3"], "Verified")
+            self.assertEqual(saved_snapshot["coverage"]["service_statuses"]["IAM"], "Verified")
             self.assertEqual(
                 saved_aws_scans[0]["service_statuses"]["CloudTrail"],
                 "Partial / Unverified",
             )
             self.assertTrue(any(
-                "AWS Organizations SCP" in element.value
+                "source of denial not confirmed" in element.value
                 for element in at.info
             ))
+            self.assertFalse(any("AWS Organizations SCP" in element.value for element in at.info))
 
             # Check that pagination selector is rendered with 6 pages (52 items / 10 per page)
             page_selectors = [number for number in at.number_input if number.key == "rec_page_All_10"]
@@ -221,7 +228,8 @@ class AppIntegrationTests(unittest.TestCase):
             self.assertIn("S3 check status: Verified.", report_notes)
             self.assertIn("IAM check status: Verified.", report_notes)
             self.assertIn("CloudTrail check status: Partial / Unverified.", report_notes)
-            self.assertTrue(any("AWS Organizations SCP" in note for note in report_notes))
+            self.assertTrue(any("source of denial not confirmed" in note for note in report_notes))
+            self.assertFalse(any("AWS Organizations SCP" in note for note in report_notes))
 
     def test_aws_scan_error_handling(self):
         aws_enabled = patch.dict(os.environ, {"CLOUDSENTRY_ENABLE_AWS_SCAN": "true"})

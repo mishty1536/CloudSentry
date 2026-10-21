@@ -79,18 +79,31 @@ def assessment_status(findings):
 
 
 def calculate_risk_score(findings):
-    """Prototype average-severity score; unknown severities retain 0 points."""
+    """Calculate risk using verified findings only; exclude Unknown severities."""
     records = normalize_findings(findings)
-    if not records:
+    verified_records = [
+        finding
+        for finding in records
+        if finding.get("severity") in SEVERITY_POINTS
+    ]
+
+    if not verified_records:
         return 0
 
     total_points = sum(
-        SEVERITY_POINTS.get(finding.get("severity"), 0)
-        for finding in records
+        SEVERITY_POINTS[finding["severity"]]
+        for finding in verified_records
     )
-    maximum_points = len(records) * 10
+    maximum_points = len(verified_records) * 10
     return round((total_points / maximum_points) * 100)
 
+
+def has_verified_findings(findings):
+    """Whether a risk score has at least one finding with verified severity."""
+    return any(
+        finding.get("severity") in SEVERITY_POINTS
+        for finding in normalize_findings(findings)
+    )
 
 def classify_risk(score):
     if score >= 70:
